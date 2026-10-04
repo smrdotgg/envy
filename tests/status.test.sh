@@ -64,6 +64,25 @@ shows "  Repeated <- $store/global:5 (literal)"
 shows 'Sync (cached upstream): ahead 0, behind 0'
 shows "Last fetch: $(cat "$XDG_STATE_HOME/envy/last-fetch") (epoch seconds)"
 shows 'Identity: matches store'
+shows 'Pending rotation: 0'
+
+# Rotation state is reported without printing values or changing the list.
+: > "$store/rotation-pending"
+status_ok
+shows 'Pending rotation: 0'
+printf 'TOKEN\nOTHER_TOKEN' > "$store/rotation-pending"
+cp "$store/rotation-pending" "$HOME/saved-rotation"
+status_ok
+shows 'Pending rotation: 2'
+cmp "$store/rotation-pending" "$HOME/saved-rotation" || fail 'status changed pending rotation list'
+rm "$store/rotation-pending"
+mkdir "$store/rotation-pending"
+status_bad
+shows 'Pending rotation: unknown'
+shows 'Identity: matches store'
+shows 'Sync (cached upstream): ahead 0, behind 0'
+grep -Fx 'envy: cannot read pending rotation list' "$HOME/status.err" > /dev/null || fail 'missing rotation list diagnostic'
+rmdir "$store/rotation-pending"
 
 # Cached remote matches resolve from subdirectories and worktrees.
 app=$HOME/app
@@ -223,7 +242,8 @@ shows 'Sync (cached upstream): ahead 1, behind 1'
 
 # Even stale status is read-only: forbid network commands and decryption.
 real_git=$(command -v git)
-export real_git
+real_age=$(command -v age)
+export real_git real_age
 mkdir "$HOME/bin"
 cat > "$HOME/bin/git" <<'GIT'
 #!/bin/sh
@@ -239,7 +259,7 @@ GIT
 cat > "$HOME/bin/age" <<'AGE'
 #!/bin/sh
 printf 'decryption\n' >> "$HOME/forbidden-calls"
-exit 1
+exec "$real_age" "$@"
 AGE
 chmod +x "$HOME/bin/git" "$HOME/bin/age"
 PATH=$HOME/bin:$PATH

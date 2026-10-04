@@ -209,8 +209,8 @@ alias points to its winning mapping file and line, marked as secret or literal;
 neither kind prints its value. Blocked layers produce no alias table.
 
 Status also shows the effective ambient setting and machine setting, quiet mode,
-local identity match, cached ahead/behind counts and the last successful fetch
-time in epoch seconds, with cache freshness and the configured interval.
+local identity match, pending-rotation count, cached ahead/behind counts and the
+last successful fetch time in epoch seconds, with cache freshness and the configured interval.
 Ahead/behind compare against the cached upstream, so unseen remote changes
 require a later sync to appear. Missing upstream information is shown as unknown.
 Status never fetches, decrypts values or waits for the store lock, even when

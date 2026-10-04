@@ -1578,6 +1578,18 @@ envy_status() {
         cat "$envy_temp/identity-error" >&2
         envy_status_failed=1
     fi
+    if [ ! -e "$envy_store/rotation-pending" ] && [ ! -L "$envy_store/rotation-pending" ]; then
+        printf '%s\n' 'Pending rotation: 0'
+    elif [ -f "$envy_store/rotation-pending" ] && envy_status_pending=$(LC_ALL=C awk '
+        length($0) { count++ }
+        END { print count + 0 }
+    ' "$envy_store/rotation-pending"); then
+        printf 'Pending rotation: %s\n' "$envy_status_pending"
+    else
+        printf '%s\n' 'Pending rotation: unknown'
+        printf '%s\n' 'envy: cannot read pending rotation list' >&2
+        envy_status_failed=1
+    fi
     return "$envy_status_failed"
 }
 
