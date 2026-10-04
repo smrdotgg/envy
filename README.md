@@ -38,7 +38,8 @@ Missing Git author settings are supplied in the store clone only.
 
 Store mutations share a lock under
 `${XDG_STATE_HOME:-$HOME/.local/state}/envy`; dead owners are cleared automatically.
-Reads use the local store without waiting for that lock or contacting the remote.
+Reads use the local store without waiting for that lock or contacting the remote
+in the foreground.
 
 Define a named project's central mapping with your editor, then use it from any
 directory:
@@ -144,7 +145,7 @@ The hook checks again after changing directory or invoking `envy`, while
 transitions between subdirectories of the same project skip decryption when
 the mapping and store revision are unchanged. It preserves the previous
 command's exit status and registering it twice is harmless. Startup-file
-installation and background refresh are planned slices.
+installation is a planned slice.
 
 `envy config` shows machine-local settings. Ambient loading defaults to on;
 `envy config ambient off` unloads managed variables at the next prompt and
@@ -156,7 +157,19 @@ takes effect at the next prompt, and unsetting it returns to the machine setting
 `envy config quiet on` silences load and unload notices while keeping errors
 visible; `envy config quiet off` restores notices. Settings are stored in
 `${XDG_CONFIG_HOME:-$HOME/.config}/envy/config` and never synced with the store.
-The displayed sync interval is reserved for the background-refresh slice.
+
+The hook and `envy run` refresh a stale store in the background without waiting
+for the remote or the store lock. The refresh is silent, disables authentication
+prompts, uses the same lock as writes, and makes fetched changes available on
+the next directory change or environment command. A command already running
+keeps its original environment.
+Other reads, including `env`, `get` and `ls`, use only the local store.
+
+`envy config sync_interval <seconds>` changes the interval (default: 14400,
+four hours); zero requests a refresh on every hook evaluation or `run`.
+Successful clones and fetches record their time in
+`${XDG_STATE_HOME:-$HOME/.local/state}/envy/last-fetch`. An unreachable remote
+leaves that timestamp and the cached environment available for the next retry.
 
 For command help and version information:
 

@@ -19,6 +19,7 @@ envy_help() (
         '  env [--project <name>]  Print shell exports for the layered environment' \
         '  hook          Print the bash/zsh ambient hook for eval' \
         '  config [ambient|quiet on|off]  Show or change machine-local settings' \
+        '  config sync_interval <seconds>  Set the background refresh interval' \
         '  check         Validate store mappings and the current .envy; list unused secrets' \
         '  pull          Fetch and rebase local commits onto the remote' \
         '  push          Push local commits, retrying once after a pull' \
@@ -84,10 +85,15 @@ envy_config() {
         envy_settings_print
         return
     fi
-    [ "$#" -eq 2 ] || envy_error 'usage: envy config [ambient|quiet on|off]'
+    [ "$#" -eq 2 ] || envy_error 'usage: envy config [ambient|quiet on|off|sync_interval <seconds>]'
     case $1:$2 in
         ambient:on|ambient:off|quiet:on|quiet:off) ;;
-        *) envy_error 'usage: envy config [ambient|quiet on|off]' ;;
+        sync_interval:*)
+            case $2 in
+                ''|*[!0-9]*) envy_error 'sync_interval must be a non-negative number of seconds' ;;
+            esac
+            ;;
+        *) envy_error 'usage: envy config [ambient|quiet on|off|sync_interval <seconds>]' ;;
     esac
     # Share the machine lock to serialize settings updates, even before init.
     envy_begin
@@ -95,6 +101,7 @@ envy_config() {
     case $1 in
         ambient) envy_ambient=$2 ;;
         quiet) envy_quiet=$2 ;;
+        sync_interval) envy_sync_interval=$2 ;;
     esac
     mkdir -p "$envy_config_dir" || envy_error 'cannot create settings directory'
     envy_temp=$(mktemp -d "$envy_config_dir/.config.XXXXXX") ||
@@ -260,6 +267,41 @@ envy_clean_store() {
     fi
 }
 
+envy_record_fetch() {
+    # Readers must see a complete timestamp, even while a sync is in progress.
+    [ ! -d "$envy_state/last-fetch" ] || return 1
+    if date +%s > "$envy_state/.last-fetch.$$" &&
+        mv "$envy_state/.last-fetch.$$" "$envy_state/last-fetch"; then
+        return 0
+    fi
+    rm -f "$envy_state/.last-fetch.$$"
+    return 1
+}
+
+envy_refresh_due() (
+    envy_now=$(date +%s) || exit 1
+    # awk treats leading zeroes as decimal and avoids shell integer overflow
+    # for large intervals. Missing or damaged timestamps count as stale.
+    if [ ! -f "$envy_state/last-fetch" ]; then
+        exit 0
+    fi
+    LC_ALL=C awk -v now="$envy_now" -v interval="$envy_sync_interval" '
+        NR == 1 && /^[0-9]+$/ { fetched = $0; valid = 1; next }
+        { valid = 0 }
+        END { exit (valid && now >= fetched && now - fetched < interval) }
+    ' "$envy_state/last-fetch"
+)
+
+envy_refresh_background() (
+    # Schedule only after the foreground has buffered its environment. All
+    # descriptors are detached so eval/command substitution cannot wait for us.
+    envy_paths
+    [ -d "$envy_store/.git" ] || exit 0
+    envy_settings_load
+    envy_refresh_due || exit 0
+    nohup sh "$0" sync --background < /dev/null > /dev/null 2>&1 &
+) > /dev/null 2>&1
+
 envy_fetch_rebase() {
     envy_sync_failure=
     envy_pull_changed=no
@@ -271,7 +313,7 @@ envy_fetch_rebase() {
         envy_sync_failure=offline
         return 1
     fi
-    date +%s > "$envy_state/last-fetch" || {
+    envy_record_fetch || {
         envy_sync_failure=state
         return 1
     }
@@ -374,9 +416,36 @@ envy_report_push() {
 envy_sync_command() {
     envy_sync_command_name=$1
     shift
+    envy_background=no
+    if [ "$envy_sync_command_name" = sync ] && [ "${1-}" = --background ]; then
+        shift
+        envy_background=yes
+        # This internal mode shares the ordinary sync engine and store lock.
+        exec < /dev/null > /dev/null 2>&1
+    fi
     [ "$#" -eq 0 ] || envy_error "usage: envy $envy_sync_command_name"
     envy_dependencies
     envy_begin
+    if [ "$envy_background" = yes ]; then
+        envy_settings_load
+        # Another queued refresh may have completed while we waited for a write.
+        envy_refresh_due || return 0
+        # Redirection alone cannot prevent Git/SSH from opening /dev/tty.
+        GIT_TERMINAL_PROMPT=0
+        GIT_ASKPASS=false
+        SSH_ASKPASS=false
+        envy_ssh_command=${GIT_SSH_COMMAND-}
+        if [ -z "$envy_ssh_command" ]; then
+            envy_ssh_command=$(git -C "$envy_store" config core.sshCommand || :)
+        fi
+        if [ -z "$envy_ssh_command" ]; then
+            # GIT_SSH is an executable path, unlike the shell command above.
+            envy_ssh_command=$(printf '%s\n' "${GIT_SSH:-ssh}" | LC_ALL=C sed "s/'/'\\\\''/g")
+            envy_ssh_command=$(printf "'%s'" "$envy_ssh_command")
+        fi
+        GIT_SSH_COMMAND="$envy_ssh_command -oBatchMode=yes"
+        export GIT_TERMINAL_PROMPT GIT_ASKPASS SSH_ASKPASS GIT_SSH_COMMAND
+    fi
     envy_validate_store "$envy_store"
     envy_clean_store
     envy_git_identity
@@ -414,6 +483,7 @@ envy_init() {
         mv "$envy_stage/store" "$envy_store"
         mv "$envy_stage/identity" "$envy_identity"
         envy_git_identity
+        envy_record_fetch || envy_error 'could not record fetch time'
         return
     fi
     # age owns the terminal passphrase prompt, including its blank-input generator.
@@ -428,6 +498,7 @@ envy_init() {
     mv "$envy_stage/store" "$envy_store"
     mv "$envy_stage/identity" "$envy_identity"
     envy_commit_push 'init store'
+    envy_record_fetch || envy_error 'could not record fetch time'
 }
 
 envy_set() {
@@ -1030,6 +1101,7 @@ envy_environment() {
             # Finish cleanup before aliases can replace any script variables.
             envy_cleanup
             trap - 0 HUP INT TERM
+            envy_refresh_background || :
             umask "$envy_inherited_umask"
             # Shell-special variables (for example OPTIND) can reject a value
             # with a fatal diagnostic containing it. Suppress that diagnostic
@@ -1171,6 +1243,7 @@ envy_hook_env() {
     esac
     if [ "$envy_ambient" = off ]; then
         printf '%s\n' '_envy_unload' 'unset _ENVY_FP'
+        envy_refresh_background || :
         return
     fi
     envy_temp=$(mktemp -d "${TMPDIR:-/tmp}/envy-hook.XXXXXX") || envy_error 'cannot create temporary directory'
@@ -1181,6 +1254,7 @@ envy_hook_env() {
         LC_ALL=C awk 'NR == 1 { print; exit }' "$envy_temp/error" >&2
         printf '%s\n' '_envy_unload' 'unset _ENVY_FP'
     fi
+    envy_refresh_background || :
 }
 
 envy_check() {
