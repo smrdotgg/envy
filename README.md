@@ -70,8 +70,9 @@ underscores, starting with a letter or underscore. Project names follow
 `[a-z0-9][a-z0-9._-]*`. Blank lines and comments starting with `#` are ignored.
 Whitespace around assignments and inline comments are errors. Global mappings
 apply to every `run` and `env`, including when no project is selected. Layers
-are read in order: global, then the selected central project. The last assignment
-to an alias wins, including repeated aliases within a file.
+are read in order: global, the selected central project, then the approved
+in-project `.envy`. The last assignment to an alias wins, including repeated
+aliases within a file.
 
 `link [name]` associates the checkout's `origin` with a central project, creating
 an empty mapping if needed. The name defaults to the checkout directory name.
@@ -82,7 +83,7 @@ transport rewrites on a machine.
 A remote can belong to only one project. Other clones and git worktrees match
 automatically, including from subdirectories; reads use only the cached store.
 Without `--project`, `run` and `env` select this matched project. An unlinked
-directory receives only the global layer.
+directory receives the global layer and its approved `.envy`, if present.
 
 If a push retry brings in a competing link from another machine, envy refuses
 to push duplicate remote ownership and keeps the local commits for recovery.
@@ -99,16 +100,33 @@ Removing a remote association affects every matching clone and worktree, and
 preserves the project's mapping. If a local override covered a remote match,
 removing that override reveals the remote project again.
 
+A project can carry a `.envy` mapping at its root, using the same grammar. Run
+`envy allow` from that project or a subdirectory to review its aliases and secret
+names and approve it on this machine. The review includes overwritten requests
+and identifies literals without printing values. Approval records the physical
+absolute path and Git object hash in
+`${XDG_STATE_HOME:-$HOME/.local/state}/envy/allowed`; it never changes the store.
+Any change to the file requires approval again. An unapproved or changed `.envy`
+blocks all layers: `env` emits no exports and `run` starts no command, with a
+message directing you to `envy allow`. Clones, worktrees and other machines need
+their own approval.
+
+The root is the Git checkout's top level; nested `.envy` files do not create
+subdirectory projects. Outside Git, the nearest ancestor with a `.envy` or a
+local link is the root. A `.envy` works without a central project or link.
+`--project` selects the central layer explicitly; the current root's `.envy`
+still applies and requires approval. Approval paths cannot contain newlines.
+
 Project edits validate the entire mapping before saving, committing and pushing.
 Invalid edits leave the previous mapping intact. Syntax errors and missing secrets
 report the file, line and key; `run` launches nothing and `env` emits nothing.
 Exports preserve quotes and all newlines, including trailing newlines. `run`
 returns the command's exit status. Project removal leaves its secrets in the store.
-`check` validates the global mapping and every central project mapping, reports
-all errors with their file and line, and exits non-zero on errors. It also reports
+`check` validates the global mapping, every central project mapping and the
+current root's `.envy`, even before approval. It reports all errors with their
+file and line and exits non-zero on errors. It also reports
 remotes listed under more than one project and lists unreferenced secrets as
-information, without decrypting them. In-project mapping files are planned for
-a later slice.
+information, without decrypting them.
 
 For command help and version information:
 

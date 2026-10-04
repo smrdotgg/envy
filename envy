@@ -14,9 +14,10 @@ envy_help() (
         '  project ls|show|edit|rm  Manage central mappings (show/edit --global)' \
         '  link [--local] [name]  Link this checkout or directory to a project' \
         '  unlink        Remove the current local link, or its origin link' \
+        '  allow         Review and approve the current project .envy on this machine' \
         '  run [--project <name>] -- cmd...  Run with the layered environment' \
         '  env [--project <name>]  Print shell exports for the layered environment' \
-        '  check         Validate all store mappings and list unused secrets' \
+        '  check         Validate store mappings and the current .envy; list unused secrets' \
         '  pull          Fetch and rebase local commits onto the remote' \
         '  push          Push local commits, retrying once after a pull' \
         '  sync          Pull, then push local commits' \
@@ -25,7 +26,6 @@ envy_help() (
         '' \
         'Planned commands (not implemented yet):' \
         '  Secrets:  edit, rm, mv' \
-        '  Projects: allow' \
         '  Using:    status' \
         '  Machine:  hook, config, rekey, doctor, self-update, uninstall'
 )
@@ -521,7 +521,7 @@ envy_directory_root() {
         envy_root=$envy_working_directory
         while :; do
             envy_local_name=$(envy_local_project "$envy_root") || envy_error 'cannot read local links'
-            if [ -n "$envy_local_name" ] || [ -f "$envy_root/.envy" ]; then
+            if [ -n "$envy_local_name" ] || [ -e "$envy_root/.envy" ] || [ -L "$envy_root/.envy" ]; then
                 break
             fi
             if [ "$envy_root" = / ]; then
@@ -551,6 +551,72 @@ envy_directory_project() {
     if [ -n "$envy_selected_project" ]; then
         envy_project_name "$envy_selected_project"
     fi
+}
+
+# Hash and parse the same private snapshot, even if the checkout changes while
+# the command runs. Git hashes stdin without applying repository clean filters.
+envy_snapshot_project() {
+    envy_inproject=${envy_root%/}/.envy
+    if [ ! -e "$envy_inproject" ] && [ ! -L "$envy_inproject" ]; then
+        envy_inproject=
+        return 0
+    fi
+    if [ ! -f "$envy_inproject" ]; then
+        printf 'envy: %s: mapping is not a regular file\n' "$envy_inproject" >&2
+        return 1
+    fi
+    if ! cat "$envy_inproject" > "$envy_temp/in-project"; then
+        printf 'envy: %s: cannot read mapping\n' "$envy_inproject" >&2
+        return 1
+    fi
+    envy_inproject_hash=$(git hash-object --stdin < "$envy_temp/in-project") || {
+        printf 'envy: %s: cannot hash mapping\n' "$envy_inproject" >&2
+        return 1
+    }
+}
+
+envy_project_approved() (
+    [ -e "$envy_state/allowed" ] || return 1
+    [ -f "$envy_state/allowed" ] || envy_error 'approval list is not a regular file'
+    ENVY_ALLOW_PATH=$envy_inproject ENVY_ALLOW_HASH=$envy_inproject_hash LC_ALL=C awk '
+        {
+            space = index($0, " ")
+            if (space && substr($0, space + 1) == ENVIRON["ENVY_ALLOW_PATH"] &&
+                substr($0, 1, space - 1) == ENVIRON["ENVY_ALLOW_HASH"]) approved = 1
+        }
+        END { exit !approved }
+    ' "$envy_state/allowed"
+)
+
+envy_allow() {
+    [ "$#" -eq 0 ] || envy_error 'usage: envy allow'
+    envy_begin
+    envy_require_store
+    envy_temp=$(mktemp -d "$envy_data/.allow.XXXXXX") || envy_error 'cannot create temporary directory'
+    envy_directory_root
+    envy_snapshot_project || exit 1
+    [ -n "$envy_inproject" ] || envy_error 'no .envy at the current project root'
+    case $envy_inproject in
+        *'
+'*) envy_error 'approval paths cannot contain newlines' ;;
+    esac
+    envy_resolve_requests=$envy_temp/requests
+    : > "$envy_resolve_requests"
+    envy_resolve "$envy_temp/in-project" "$envy_inproject" > /dev/null || exit 1
+    printf 'envy: %s requests:\n' "$envy_inproject"
+    cat "$envy_resolve_requests"
+    # Serialize approval updates with the machine lock and replace atomically.
+    envy_stage=$(mktemp -d "$envy_state/.allowed.XXXXXX") || envy_error 'cannot create temporary directory'
+    : > "$envy_stage/allowed"
+    if [ -e "$envy_state/allowed" ] || [ -L "$envy_state/allowed" ]; then
+        [ -f "$envy_state/allowed" ] || envy_error 'approval list is not a regular file'
+        ENVY_ALLOW_PATH=$envy_inproject LC_ALL=C awk '
+            substr($0, index($0, " ") + 1) != ENVIRON["ENVY_ALLOW_PATH"] { print }
+        ' "$envy_state/allowed" > "$envy_stage/allowed" || envy_error 'cannot read approval list'
+    fi
+    printf '%s %s\n' "$envy_inproject_hash" "$envy_inproject" >> "$envy_stage/allowed"
+    mv "$envy_stage/allowed" "$envy_state/allowed"
+    printf 'envy: approved %s on this machine\n' "$envy_inproject"
 }
 
 envy_stage_local_link() {
@@ -674,7 +740,8 @@ envy_resolve() (
         printf '%s\n' "${envy_file%.age}" >> "$envy_temp/names"
     done
     : > "$envy_temp/errors"
-    if ENVY_MAP_ERRORS=$envy_temp/errors ENVY_MAP_REFERENCES=${envy_resolve_references-} LC_ALL=C awk '
+    if ENVY_MAP_ERRORS=$envy_temp/errors ENVY_MAP_REFERENCES=${envy_resolve_references-} \
+        ENVY_MAP_REQUESTS=${envy_resolve_requests-} LC_ALL=C awk '
         BEGIN {
             for (i = 2; i < ARGC; i += 2) {
                 display[ARGV[i]] = ARGV[i + 1]
@@ -720,6 +787,9 @@ envy_resolve() (
                     error("secret not found: " value); next
                 }
             }
+            # Include overwritten requests in the review, but never values.
+            if (ENVIRON["ENVY_MAP_REQUESTS"] != "")
+                print alias "=" (kind == "secret" ? value : "__literal__") >> ENVIRON["ENVY_MAP_REQUESTS"]
             if (!(alias in values)) order[++total] = alias
             values[alias] = value
             kinds[alias] = kind
@@ -830,6 +900,12 @@ envy_environment() {
     envy_temp=$(mktemp -d "$envy_data/.env.XXXXXX") || envy_error 'cannot create temporary directory'
     if [ -z "$envy_selected_project" ]; then
         envy_directory_project
+    else
+        envy_directory_root
+    fi
+    envy_snapshot_project || exit 1
+    if [ -n "$envy_inproject" ] && ! envy_project_approved; then
+        envy_error "$envy_inproject: unapproved or changed mapping; run envy allow"
     fi
     # Build layers in a subshell so the child command arguments stay intact.
     (
@@ -841,6 +917,9 @@ envy_environment() {
             envy_map=$envy_store/projects/$envy_selected_project/map
             [ -f "$envy_map" ] || envy_error "project not found: $envy_selected_project"
             set -- "$@" "$envy_map" "$envy_map"
+        fi
+        if [ -n "$envy_inproject" ]; then
+            set -- "$@" "$envy_temp/in-project" "$envy_inproject"
         fi
         envy_resolve "$@"
     ) > "$envy_temp/table" || exit 1
@@ -901,6 +980,16 @@ envy_check() {
             envy_check_failed=1
         fi
     done
+    envy_directory_root
+    # Validation is useful before approval and does not load any environment.
+    if envy_snapshot_project; then
+        if [ -n "$envy_inproject" ] &&
+            ! envy_resolve "$envy_temp/in-project" "$envy_inproject" > /dev/null; then
+            envy_check_failed=1
+        fi
+    else
+        envy_check_failed=1
+    fi
     # References include overwritten assignments, but exclude literal text.
     LC_ALL=C awk '
         FILENAME == ARGV[1] { referenced[$0] = 1; next }
@@ -916,7 +1005,7 @@ case ${1-help} in
     pull|push|sync)
         envy_sync_command "$@"
         ;;
-    init|unlock|set|get|ls|project|check|link|unlink)
+    init|unlock|set|get|ls|project|check|link|unlink|allow)
         envy_command=$1
         shift
         "envy_$envy_command" "$@"
