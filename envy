@@ -78,7 +78,7 @@ envy_commit_push() {
         envy_error 'push failed; local commit retained'
 }
 
-envy_init() (
+envy_init() {
     [ "$#" -eq 1 ] || envy_error 'usage: envy init <url>'
     envy_dependencies
     envy_paths
@@ -88,7 +88,7 @@ envy_init() (
     umask 077
     mkdir -p "$envy_data"
     envy_stage=$(mktemp -d "$envy_data/.init.XXXXXX") || envy_error 'cannot create temporary directory'
-    trap 'rm -rf "$envy_stage"' 0
+    trap 'trap "" HUP INT TERM; rm -rf "$envy_stage"' 0
     trap 'exit 1' HUP INT TERM
     git clone --quiet -- "$1" "$envy_stage/store" > /dev/null 2>&1 ||
         envy_error 'could not clone store repository'
@@ -109,16 +109,17 @@ envy_init() (
     mv "$envy_stage/store" "$envy_store"
     mv "$envy_stage/identity" "$envy_identity"
     envy_commit_push 'init store'
-)
+}
 
-envy_set() (
+envy_set() {
     [ "$#" -eq 1 ] || envy_error 'usage: envy set NAME; supply the value through the prompt or stdin'
     envy_name "$1"
     envy_require_store
     umask 077
     envy_temp=$(mktemp -d "$envy_data/.set.XXXXXX") || envy_error 'cannot create temporary directory'
     envy_tty_state=
-    trap '[ -z "$envy_tty_state" ] || stty "$envy_tty_state"; rm -rf "$envy_temp"' 0
+    # Ignore further interrupts during cleanup, even if the terminal has disconnected.
+    trap 'trap "" HUP INT TERM; [ -z "$envy_tty_state" ] || stty "$envy_tty_state" 2> /dev/null || :; rm -rf "$envy_temp"' 0
     trap 'exit 1' HUP INT TERM
     if [ -t 0 ]; then
         envy_tty_state=$(stty -g) || envy_error 'cannot read terminal settings'
@@ -141,7 +142,7 @@ envy_set() (
     mv "$envy_temp/secret.age" "$envy_store/secrets/$1.age"
     git -C "$envy_store" add -- "secrets/$1.age"
     envy_commit_push "set $1"
-)
+}
 
 envy_get() (
     [ "$#" -eq 1 ] || envy_error 'usage: envy get NAME'
