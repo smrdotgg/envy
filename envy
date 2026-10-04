@@ -8,6 +8,7 @@ envy_help() (
         'Commands:' \
         '  init <url>    Create or join an encrypted store' \
         '  unlock        Recover the local identity with the store passphrase' \
+        '  rekey         Replace the store key and track secrets needing provider rotation' \
         '  set NAME      Store a value from a hidden prompt or stdin' \
         '  get NAME      Print a stored value exactly' \
         "  edit NAME     Edit or create a secret with \$EDITOR (default: vi)" \
@@ -32,7 +33,7 @@ envy_help() (
         '  help          Show this help' \
         '' \
         'Planned commands (not implemented yet):' \
-        '  Machine:  rekey, doctor, self-update, uninstall'
+        '  Machine:  doctor, self-update, uninstall'
 )
 
 envy_error() {
@@ -116,6 +117,13 @@ envy_cleanup() {
     trap '' HUP INT TERM
     [ -z "$envy_editor_pid" ] || kill "$envy_editor_pid" 2> /dev/null || :
     [ -z "$envy_tty_state" ] || stty "$envy_tty_state" 2> /dev/null || :
+    if [ "$envy_rekey_restore" = yes ]; then
+        # Rekey starts from a clean store. Before commit succeeds, restore the
+        # pulled snapshot and old identity together on failure or interruption.
+        git -C "$envy_store" reset --hard "$envy_rekey_before" > /dev/null 2>&1 || :
+        [ "$envy_rekey_had_pending" = yes ] || rm -f "$envy_store/rotation-pending"
+        mv "$envy_temp/old-identity" "$envy_identity" || :
+    fi
     [ -z "$envy_temp" ] || rm -rf "$envy_temp"
     [ -z "$envy_stage" ] || rm -rf "$envy_stage"
     [ -z "$envy_fetch_temp" ] || rm -f "$envy_fetch_temp"
@@ -139,6 +147,7 @@ envy_prepare() {
     envy_stage=
     envy_fetch_temp=
     envy_rebasing=no
+    envy_rekey_restore=no
     envy_lock=
     trap 'envy_cleanup' 0
     trap 'exit 1' HUP INT TERM
@@ -330,6 +339,19 @@ envy_fetch_rebase() {
         envy_sync_failure=rebase
         return 1
     }
+    # Divergent commits encrypted with different identities cannot be merged:
+    # even a clean text rebase could leave unreadable ciphertext in the store.
+    if ! git -C "$envy_store" merge-base --is-ancestor HEAD FETCH_HEAD &&
+        ! git -C "$envy_store" merge-base --is-ancestor FETCH_HEAD HEAD; then
+        envy_remote_recipient=$(git -C "$envy_store" show FETCH_HEAD:recipient 2> /dev/null) || {
+            envy_sync_failure=identity
+            return 1
+        }
+        if [ "$envy_remote_recipient" != "$(cat "$envy_store/recipient")" ]; then
+            envy_sync_failure=identity
+            return 1
+        fi
+    fi
     # Disable autostash so a user's git configuration cannot hide dirty state.
     envy_rebasing=yes
     if ! git -C "$envy_store" -c rebase.autoStash=false -c rebase.updateRefs=false \
@@ -386,6 +408,7 @@ envy_sync_error() {
     case $envy_sync_failure in
         remotes) envy_error 'duplicate project remotes; local commits retained; resolve the duplicate links before retrying envy sync' ;;
         conflict) envy_error 'sync conflict; rebase aborted and local commits retained; reconcile the conflicting changes before retrying' ;;
+        identity) envy_error 'sync crosses a rekey; local commits retained; reconcile the divergent store histories before syncing, then run envy unlock' ;;
         offline) envy_error 'remote unavailable; local commits retained; run envy sync when online' ;;
         branch) envy_error 'cannot sync a detached HEAD; check out the store branch first' ;;
         rebase) envy_error 'could not rebase store; local commits retained' ;;
@@ -513,6 +536,87 @@ envy_init() {
     envy_record_fetch || envy_error 'could not record fetch time'
 }
 
+envy_rekey() {
+    [ "$#" -eq 0 ] || envy_error 'usage: envy rekey'
+    envy_dependencies
+    envy_begin
+    envy_validate_store "$envy_store"
+    envy_clean_store
+    envy_git_identity
+    # A cached successful fetch is insufficient: always pull now, under lock.
+    envy_fetch_rebase || envy_sync_error
+    envy_require_store
+    envy_clean_store
+    if [ -e "$envy_store/rotation-pending" ] || [ -L "$envy_store/rotation-pending" ]; then
+        [ -f "$envy_store/rotation-pending" ] || envy_error 'cannot read pending rotation list'
+    fi
+    envy_rekey_before=$(git -C "$envy_store" rev-parse HEAD)
+    envy_temp=$(mktemp -d "$envy_data/.rekey.XXXXXX") || envy_error 'cannot create temporary directory'
+    cp "$envy_identity" "$envy_temp/old-identity"
+    age-keygen -o "$envy_temp/identity" > /dev/null 2>&1 || envy_error 'could not create identity'
+    chmod 600 "$envy_temp/identity"
+    age-keygen -y "$envy_temp/identity" > "$envy_temp/recipient" 2> /dev/null ||
+        envy_error 'could not derive public key'
+    age -p -a -o "$envy_temp/identity.age" "$envy_temp/identity" ||
+        envy_error 'could not protect identity with a passphrase'
+    mkdir "$envy_temp/secrets"
+    : > "$envy_temp/rotation-pending"
+    for envy_file in "$envy_store"/secrets/*.age; do
+        [ -f "$envy_file" ] || continue
+        envy_secret=${envy_file##*/}
+        envy_secret=${envy_secret%.age}
+        envy_name "$envy_secret"
+        age -d -i "$envy_identity" "$envy_file" > "$envy_temp/value" 2> /dev/null ||
+            envy_error "could not decrypt secret: $envy_secret"
+        age -a -R "$envy_temp/recipient" -o "$envy_temp/secrets/$envy_secret.age" "$envy_temp/value" 2> /dev/null ||
+            envy_error 'could not encrypt secret'
+        rm -f "$envy_temp/value"
+        printf '%s\n' "$envy_secret" >> "$envy_temp/rotation-pending"
+    done
+    envy_rekey_had_pending=no
+    [ ! -f "$envy_store/rotation-pending" ] || envy_rekey_had_pending=yes
+    envy_rekey_restore=yes
+    mkdir -p "$envy_store/secrets"
+    for envy_file in "$envy_temp"/secrets/*.age; do
+        [ -f "$envy_file" ] || continue
+        mv "$envy_file" "$envy_store/secrets/"
+    done
+    mv "$envy_temp/recipient" "$envy_store/recipient"
+    mv "$envy_temp/identity.age" "$envy_store/identity.age"
+    mv "$envy_temp/rotation-pending" "$envy_store/rotation-pending"
+    mv "$envy_temp/identity" "$envy_identity"
+    git -C "$envy_store" add -- recipient identity.age rotation-pending secrets
+    git -C "$envy_store" commit --quiet -m 'rekey store' > /dev/null 2>&1 ||
+        envy_error 'could not commit store changes'
+    envy_rekey_restore=no
+    printf '%s\n' 'envy: rekeyed store; rotate these secrets at their providers:'
+    cat "$envy_store/rotation-pending"
+    # Never rebase a rekey onto a concurrent old-key write. Keep the coherent
+    # local commit/key if the push fails; ordinary sync checks key divergence.
+    envy_push_once || envy_error 'rekey push failed; new local identity and commit retained; run envy push to retry, reconciling any divergent remote history first'
+}
+
+# Stage bookkeeping before mutating ciphertext, so unreadable metadata fails
+# without changing either. Rename preserves a pending mark under its new name.
+envy_rotation_prepare() {
+    if [ -e "$envy_store/rotation-pending" ] || [ -L "$envy_store/rotation-pending" ]; then
+        [ -f "$envy_store/rotation-pending" ] || envy_error 'cannot read pending rotation list'
+        LC_ALL=C awk -v name="$1" -v replacement="${2-}" '
+            $0 != name { print; next }
+            length(replacement) { print replacement }
+        ' "$envy_store/rotation-pending" > "$envy_temp/rotation-pending" ||
+            envy_error 'cannot read pending rotation list'
+    fi
+}
+
+envy_rotation_save() {
+    if [ -f "$envy_temp/rotation-pending" ] &&
+        ! cmp -s "$envy_store/rotation-pending" "$envy_temp/rotation-pending"; then
+        mv "$envy_temp/rotation-pending" "$envy_store/rotation-pending"
+        git -C "$envy_store" add -- rotation-pending
+    fi
+}
+
 envy_set() {
     [ "$#" -eq 1 ] || envy_error 'usage: envy set NAME; supply the value through the prompt or stdin'
     envy_name "$1"
@@ -520,6 +624,7 @@ envy_set() {
     envy_require_store
     envy_clean_store
     envy_temp=$(mktemp -d "$envy_data/.set.XXXXXX") || envy_error 'cannot create temporary directory'
+    envy_rotation_prepare "$1"
     if [ -t 0 ]; then
         envy_tty_state=$(stty -g) || envy_error 'cannot read terminal settings'
         stty -echo || envy_error 'cannot hide terminal input'
@@ -539,6 +644,7 @@ envy_set() {
     fi
     mkdir -p "$envy_store/secrets"
     mv "$envy_temp/secret.age" "$envy_store/secrets/$1.age"
+    envy_rotation_save
     git -C "$envy_store" add -- "secrets/$1.age"
     envy_commit_push "set $1"
 }
@@ -587,17 +693,12 @@ envy_edit() {
     if [ "$envy_edit_existing" = yes ] && cmp -s "$envy_temp/original" "$envy_temp/value"; then
         return
     fi
+    envy_rotation_prepare "$1"
     age -a -R "$envy_store/recipient" -o "$envy_temp/secret.age" "$envy_temp/value" 2> /dev/null ||
         envy_error 'could not encrypt secret'
     mkdir -p "$envy_store/secrets"
     mv "$envy_temp/secret.age" "$envy_store/secrets/$1.age"
-    if [ -f "$envy_store/rotation-pending" ]; then
-        awk -v name="$1" '$0 != name' "$envy_store/rotation-pending" > "$envy_temp/rotation-pending"
-        if ! cmp -s "$envy_store/rotation-pending" "$envy_temp/rotation-pending"; then
-            mv "$envy_temp/rotation-pending" "$envy_store/rotation-pending"
-            git -C "$envy_store" add -- rotation-pending
-        fi
-    fi
+    envy_rotation_save
     # Remove plaintext and editor backup files before committing or syncing.
     rm -rf "$envy_temp"
     envy_temp=
@@ -656,8 +757,8 @@ envy_rm() {
     envy_require_store
     envy_clean_store
     [ -f "$envy_store/secrets/$1.age" ] || envy_error "secret not found: $1"
+    envy_temp=$(mktemp -d "$envy_data/.rm.XXXXXX") || envy_error 'cannot create temporary directory'
     if [ "$envy_force" = no ]; then
-        envy_temp=$(mktemp -d "$envy_data/.rm.XXXXXX") || envy_error 'cannot create temporary directory'
         envy_resolve_target=$1
         envy_resolve_locations=$envy_temp/locations
         : > "$envy_resolve_locations"
@@ -669,7 +770,9 @@ envy_rm() {
         fi
         [ "$envy_maps_failed" -eq 0 ] || exit 1
     fi
+    envy_rotation_prepare "$1"
     git -C "$envy_store" rm --quiet -- "secrets/$1.age"
+    envy_rotation_save
     envy_commit_push "rm $1"
 }
 
@@ -685,6 +788,7 @@ envy_mv() {
         envy_error "secret already exists: $2"
     fi
     envy_temp=$(mktemp -d "$envy_data/.mv.XXXXXX") || envy_error 'cannot create temporary directory'
+    envy_rotation_prepare "$1" "$2"
     mkdir "$envy_temp/maps"
     envy_resolve_target=$1
     envy_resolve_rename_to=$2
@@ -699,6 +803,7 @@ envy_mv() {
         fi
     done
     git -C "$envy_store" mv -- "secrets/$1.age" "secrets/$2.age"
+    envy_rotation_save
     printf '%s\n' 'envy: warning: in-project .envy files are not updated; update their references manually' >&2
     envy_commit_push "mv $1 $2"
 }
@@ -1636,7 +1741,7 @@ case ${1-help} in
     pull|push|sync)
         envy_sync_command "$@"
         ;;
-    init|unlock|set|get|edit|ls|rm|mv|project|check|link|unlink|allow|config|status)
+    init|unlock|rekey|set|get|edit|ls|rm|mv|project|check|link|unlink|allow|config|status)
         envy_command=$1
         shift
         "envy_$envy_command" "$@"

@@ -33,6 +33,23 @@ directory that is removed on exit, including interrupts and editor failures.
 An editor failure leaves the stored secret unchanged. Saving a changed value
 also clears that secret's pending rotation mark.
 
+Run `./envy rekey` after losing a machine to replace the shared identity and
+protect it with a new passphrase (leave age's prompt blank to generate one).
+Rekey requires a successful pull, re-encrypts every current secret, and pushes
+one commit. Keep the new passphrase safe. Other machines must pull, then run
+`envy unlock` and enter it once; until then commands refuse the mismatched key
+and the hook prints a one-line notice without prompting.
+
+Rekey prints every secret name and records them in `rotation-pending`.
+Rotate each credential at its provider, then save the replacement with `set`
+or `edit` to clear its mark. `status` reports how many remain. Removal clears
+the mark; rename carries it to the new name. Rekey does not revoke credentials
+or protect old values in Git history: the old identity can still decrypt them.
+Failures before the rekey commit restore the pulled store and local identity.
+A failed push retains the new local key and commit. Sync refuses divergent
+histories that use different keys; reconcile those histories before syncing
+so old-key writes cannot silently become unreadable.
+
 Remove or rename a secret with:
 
 ```sh
