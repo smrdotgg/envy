@@ -1,7 +1,24 @@
 # envy
 
-A personal secrets manager, under development. This first slice provides the
-command-line scaffold; secret management is not implemented yet.
+A personal secrets manager, under development. Create a store in an empty git
+repository, then set, read and list encrypted secrets:
+
+```sh
+./envy init /path/to/empty-store.git
+./envy set API_TOKEN
+./envy get API_TOKEN
+./envy ls
+```
+
+`init` asks age to encrypt the store identity with a passphrase; leave the prompt
+blank to generate one, and keep it safe. The local decrypted identity is stored
+with mode `0600` under `${XDG_DATA_HOME:-$HOME/.local/share}/envy`, alongside the
+store clone. `set` reads one line from a hidden terminal prompt, or preserves the
+exact bytes of piped stdin. Values cannot be supplied as arguments. Each write
+creates one commit and pushes it immediately. Joining existing stores and more
+advanced sync are planned for later slices.
+
+For command help and version information:
 
 ```sh
 ./envy version

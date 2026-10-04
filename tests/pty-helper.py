@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Drive age's terminal prompts; responses arrive on stdin, never in argv.
+"""Drive age and envy terminal prompts; responses arrive on stdin, never in argv.
 
 Usage: python3 tests/pty-helper.py [--timeout SECONDS] -- age ... < responses
 Supply one response per line, including a confirmation for encryption.
 Child terminal output is deliberately withheld to avoid logging secrets.
+--transcript records output in a private fixture file for terminal assertions.
 Only the test harness depends on Python; envy has no Python dependency.
 """
 
@@ -21,6 +22,7 @@ import time
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=20)
+    parser.add_argument("--transcript")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command
@@ -29,6 +31,11 @@ def main():
     if not command or args.timeout <= 0:
         parser.error("a command and a positive timeout are required")
     responses = iter(sys.stdin.buffer.read().splitlines())
+    transcript = None
+    if args.transcript:
+        transcript = os.fdopen(
+            os.open(args.transcript, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb"
+        )
     pid, terminal = pty.fork()
     if pid == 0:
         try:
@@ -37,7 +44,7 @@ def main():
             os._exit(127)
 
     # age 1.0's prompts, shared by Linux and macOS; no platform-specific script flags.
-    prompt = re.compile(rb"(?:Enter|Confirm) passphrase[^\r\n]*?: ")
+    prompt = re.compile(rb"(?:Enter|Confirm) passphrase[^\r\n]*?: |Secret value: ")
     pending = b""
     deadline = time.monotonic() + args.timeout
     reaped = False
@@ -46,6 +53,18 @@ def main():
             ended, status = os.waitpid(pid, os.WNOHANG)
             if ended:
                 reaped = True
+                # Drain the final output so transcript assertions cover the whole command.
+                if transcript is not None:
+                    while select.select([terminal], [], [], 0)[0]:
+                        try:
+                            output = os.read(terminal, 4096)
+                        except OSError as error:
+                            if error.errno != errno.EIO:
+                                raise
+                            break
+                        if not output:
+                            break
+                        transcript.write(output)
                 if os.WIFEXITED(status):
                     return os.WEXITSTATUS(status)
                 return 128 + os.WTERMSIG(status)
@@ -66,6 +85,8 @@ def main():
                 # A closed terminal can precede waitpid reporting process exit.
                 time.sleep(min(remaining, 0.01))
                 continue
+            if transcript is not None:
+                transcript.write(output)
             pending += output
             while True:
                 match = prompt.search(pending)
@@ -86,6 +107,8 @@ def main():
                 pass
             os.waitpid(pid, 0)
         os.close(terminal)
+        if transcript is not None:
+            transcript.close()
 
 
 if __name__ == "__main__":
