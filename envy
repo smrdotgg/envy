@@ -115,6 +115,7 @@ envy_cleanup() {
     [ -z "$envy_tty_state" ] || stty "$envy_tty_state" 2> /dev/null || :
     [ -z "$envy_temp" ] || rm -rf "$envy_temp"
     [ -z "$envy_stage" ] || rm -rf "$envy_stage"
+    [ -z "$envy_fetch_temp" ] || rm -f "$envy_fetch_temp"
     if [ "$envy_rebasing" = yes ] &&
         { [ -d "$envy_store/.git/rebase-merge" ] || [ -d "$envy_store/.git/rebase-apply" ]; }; then
         git -C "$envy_store" rebase --abort > /dev/null 2>&1 || :
@@ -132,6 +133,7 @@ envy_prepare() {
     envy_tty_state=
     envy_temp=
     envy_stage=
+    envy_fetch_temp=
     envy_rebasing=no
     envy_lock=
     trap 'envy_cleanup' 0
@@ -270,11 +272,14 @@ envy_clean_store() {
 envy_record_fetch() {
     # Readers must see a complete timestamp, even while a sync is in progress.
     [ ! -d "$envy_state/last-fetch" ] || return 1
-    if date +%s > "$envy_state/.last-fetch.$$" &&
-        mv "$envy_state/.last-fetch.$$" "$envy_state/last-fetch"; then
+    envy_fetch_temp=$envy_state/.last-fetch.$$
+    if date +%s > "$envy_fetch_temp" &&
+        mv "$envy_fetch_temp" "$envy_state/last-fetch"; then
+        envy_fetch_temp=
         return 0
     fi
-    rm -f "$envy_state/.last-fetch.$$"
+    rm -f "$envy_fetch_temp"
+    envy_fetch_temp=
     return 1
 }
 
@@ -434,6 +439,9 @@ envy_sync_command() {
         GIT_TERMINAL_PROMPT=0
         GIT_ASKPASS=false
         SSH_ASKPASS=false
+        # SSH honours the first BatchMode option, so configured arguments can
+        # override the appended option. Force its failing askpass helper too.
+        SSH_ASKPASS_REQUIRE=force
         envy_ssh_command=${GIT_SSH_COMMAND-}
         if [ -z "$envy_ssh_command" ]; then
             envy_ssh_command=$(git -C "$envy_store" config core.sshCommand || :)
@@ -444,7 +452,7 @@ envy_sync_command() {
             envy_ssh_command=$(printf "'%s'" "$envy_ssh_command")
         fi
         GIT_SSH_COMMAND="$envy_ssh_command -oBatchMode=yes"
-        export GIT_TERMINAL_PROMPT GIT_ASKPASS SSH_ASKPASS GIT_SSH_COMMAND
+        export GIT_TERMINAL_PROMPT GIT_ASKPASS SSH_ASKPASS SSH_ASKPASS_REQUIRE GIT_SSH_COMMAND
     fi
     envy_validate_store "$envy_store"
     envy_clean_store

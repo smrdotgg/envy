@@ -43,8 +43,8 @@ def main():
         except OSError:
             os._exit(127)
 
-    # age 1.0's prompts, shared by Linux and macOS; no platform-specific script flags.
-    prompt = re.compile(rb"(?:Enter|Confirm) passphrase[^\r\n]*?: |Secret value: ")
+    # age 1.0 and SSH fixture prompts; no platform-specific script flags.
+    prompt = re.compile(rb"(?:Enter(?: same)?|Confirm) passphrase[^\r\n]*?: |Secret value: ")
     pending = b""
     deadline = time.monotonic() + args.timeout
     reaped = False
