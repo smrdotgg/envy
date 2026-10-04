@@ -1163,7 +1163,11 @@ envy_hook_env() {
         0) envy_ambient=off ;;
         1) envy_ambient=on ;;
         '') ;;
-        *) envy_error 'ENVY_AMBIENT must be 0 or 1' ;;
+        *)
+            # Emit the same safe unload code as mapping errors, preserving quiet.
+            printf '%s\n' 'envy: ENVY_AMBIENT must be 0 or 1' >&2
+            envy_ambient=off
+            ;;
     esac
     if [ "$envy_ambient" = off ]; then
         printf '%s\n' '_envy_unload' 'unset _ENVY_FP'

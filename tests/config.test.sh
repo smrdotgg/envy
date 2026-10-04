@@ -73,6 +73,8 @@ assert_equal "$(git --git-dir="$TEST_REMOTE" rev-parse HEAD)" "$remote_head" 'co
 [ -z "$(git -C "$store" status --porcelain)" ] || fail 'config dirtied store'
 
 # A second machine joins the same store and retains independent defaults.
+"$ENVY_BIN" config ambient off
+"$ENVY_BIN" config quiet on
 mkdir "$HOME/second-home"
 (
     HOME=$HOME/second-home
@@ -86,6 +88,8 @@ RESPONSES
     "$ENVY_BIN" config > "$HOME/settings"
 )
 cmp "$HOME/default-settings" "$HOME/second-home/settings" || fail 'settings synced to another machine'
+"$ENVY_BIN" config > "$HOME/settings"
+cmp "$HOME/config-backup" "$HOME/settings" || fail 'joining another machine changed settings'
 
 # Count decryptions while always using real age.
 real_age=$(command -v age)
@@ -152,6 +156,7 @@ notice 0 ''
 unloaded
 
 # Override changes refresh a stationary shell. No export is needed in the shim.
+unset ENVY_AMBIENT
 ENVY_AMBIENT=1
 _envy_hook 2> "$HOME/notice"
 notice 1 'loaded 4 vars'
@@ -170,6 +175,18 @@ notice 1 'loaded 4 vars'
 loaded
 
 # Quiet changes take effect on fingerprint hits and silence both notice kinds.
+envy config quiet on || fail 'quiet on failed'
+ENVY_AMBIENT=invalid
+_envy_hook 2> "$HOME/notice"
+notice 1 'ENVY_AMBIENT must be 0 or 1'
+unloaded
+unset ENVY_AMBIENT
+_envy_hook 2> "$HOME/notice"
+notice 0 ''
+loaded
+envy config quiet off || fail 'quiet off failed'
+_envy_hook 2> "$HOME/notice"
+notice 0 ''
 envy config quiet on || fail 'quiet on failed'
 _envy_hook 2> "$HOME/notice"
 notice 0 ''
