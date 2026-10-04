@@ -557,10 +557,18 @@ envy_environment() {
     : > "$envy_temp/exports"
     while IFS="$(printf '\t')" read -r envy_alias envy_kind envy_secret; do
         [ "$envy_kind" = secret ] || envy_error 'unsupported mapping kind'
-        envy_value=$(age -d -i "$envy_identity" "$envy_store/secrets/$envy_secret.age" 2> /dev/null) ||
+        envy_value=$(
+            age -d -i "$envy_identity" "$envy_store/secrets/$envy_secret.age" 2> /dev/null || exit 1
+            printf '.'
+        ) ||
             envy_error "could not decrypt secret: $envy_secret"
-        # Command substitution strips trailing newlines for environment values.
-        envy_quoted=$(printf '%s\n' "$envy_value" | LC_ALL=C sed "s/'/'\\\\''/g")
+        # A sentinel keeps command substitution from stripping value newlines.
+        envy_value=${envy_value%.}
+        # Give sed a final newline even for an unterminated value, then remove
+        # just that added newline so BSD and GNU sed produce the same result.
+        envy_quoted=$(printf '%s\n' "$envy_value" | LC_ALL=C sed "s/'/'\\\\''/g"; printf '.')
+        envy_quoted=${envy_quoted%.}
+        envy_quoted=${envy_quoted%?}
         printf "export %s='%s'\n" "$envy_alias" "$envy_quoted" >> "$envy_temp/exports"
     done < "$envy_temp/table"
     case $envy_environment_command in
@@ -571,7 +579,12 @@ envy_environment() {
             envy_cleanup
             trap - 0 HUP INT TERM
             umask "$envy_inherited_umask"
-            eval "$envy_exports"
+            # Shell-special variables (for example OPTIND) can reject a value
+            # with a fatal diagnostic containing it. Suppress that diagnostic
+            # and report a fixed error even when eval exits the shell directly.
+            trap 'printf "%s\n" "envy: could not export project environment" >&2' 0
+            eval "$envy_exports" 2> /dev/null
+            trap - 0
             exec "$@"
             ;;
     esac

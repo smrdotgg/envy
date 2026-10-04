@@ -63,9 +63,8 @@ to an alias wins.
 Project edits validate the entire mapping before saving, committing and pushing.
 Invalid edits leave the previous mapping intact. Syntax errors and missing secrets
 report the file, line and key; `run` launches nothing and `env` emits nothing.
-Exports preserve quotes and embedded newlines, stripping trailing newlines when
-converting secret values into environment variables. `run` returns the command's
-exit status. Project removal leaves its secrets in the store. Literal values,
+Exports preserve quotes and all newlines, including trailing newlines. `run`
+returns the command's exit status. Project removal leaves its secrets in the store. Literal values,
 global mappings and automatic project selection are planned for later slices.
 
 For command help and version information:

@@ -29,14 +29,14 @@ fi
 grep -F "$store/projects/blank/map:1: Alias: secret not found: SECRET" missing.err > /dev/null || fail 'empty secret set lacks missing-reference error'
 git -C "$store" checkout -- projects/blank/map
 
-# Values reach the CLI through stdin only. Environment values lose trailing
-# newlines, but retain quotes, embedded newlines, whitespace and shell syntax.
+# Values reach the CLI through stdin only. Environment values retain quotes,
+# embedded and trailing newlines, whitespace and shell syntax.
 cat > value <<'VALUE'
 throwaway 'quoted' "value" \\ $HOME $(touch should-not-exist) `touch should-not-exist`
 second line	with spaces
 VALUE
 printf '\n\n' >> value
-printf '%s' "$(cat value)" > expected
+cp value expected
 printf '%s' 'throwaway replacement' > replacement
 : > empty
 printf '\n\n' > newlines
@@ -69,7 +69,7 @@ Alias|Alias=SECRET|expected
 lower_case|lower_case=SECRET|expected
 _private|_private=_SECOND|replacement
 EMPTY|EMPTY|empty
-NEWLINES|NEWLINES|empty
+NEWLINES|NEWLINES|newlines
 Quotes|Quotes=QUOTES|quotes
 VALID
 
@@ -91,6 +91,17 @@ umask 022
 "$ENVY_BIN" run --project demo -- dash -c umask > child-umask
 assert_equal "$(cat child-umask)" "$(umask)" 'run changed the child file-creation mask'
 umask "$inherited_umask"
+
+# Dash treats OPTIND specially and rejects nonnumeric assignments. Its raw
+# error includes the assigned value, which must never reach envy diagnostics.
+printf 'OPTIND=_SECOND\n' > "$HOME/map-input"
+"$ENVY_BIN" project edit shell-special
+if "$ENVY_BIN" run --project shell-special -- dash -c 'touch child-ran' > special.out 2> special.err; then
+    fail 'shell-special assignment unexpectedly succeeded'
+fi
+[ ! -s special.out ] && [ ! -e child-ran ] || fail 'failed shell export launched a child'
+printf '%s\n' 'envy: could not export project environment' > expected-special.err
+cmp expected-special.err special.err || fail 'shell export failure exposed a value or lacked a diagnostic'
 
 # Several aliases are loaded together, overriding only the child's environment.
 Alias='inherited throwaway value'
