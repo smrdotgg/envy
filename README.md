@@ -144,7 +144,19 @@ The hook checks again after changing directory or invoking `envy`, while
 transitions between subdirectories of the same project skip decryption when
 the mapping and store revision are unchanged. It preserves the previous
 command's exit status and registering it twice is harmless. Startup-file
-installation, ambient settings and background refresh are planned slices.
+installation and background refresh are planned slices.
+
+`envy config` shows machine-local settings. Ambient loading defaults to on;
+`envy config ambient off` unloads managed variables at the next prompt and
+keeps ambient loading off. `envy config ambient on` enables it again. Explicit
+`envy run` and `envy env` work with either setting. Export `ENVY_AMBIENT=0` or
+`ENVY_AMBIENT=1` to override the setting for one shell; changing the override
+takes effect at the next prompt, and unsetting it returns to the machine setting.
+
+`envy config quiet on` silences load and unload notices while keeping errors
+visible; `envy config quiet off` restores notices. Settings are stored in
+`${XDG_CONFIG_HOME:-$HOME/.config}/envy/config` and never synced with the store.
+The displayed sync interval is reserved for the background-refresh slice.
 
 For command help and version information:
 

@@ -18,6 +18,7 @@ envy_help() (
         '  run [--project <name>] -- cmd...  Run with the layered environment' \
         '  env [--project <name>]  Print shell exports for the layered environment' \
         '  hook          Print the bash/zsh ambient hook for eval' \
+        '  config [ambient|quiet on|off]  Show or change machine-local settings' \
         '  check         Validate store mappings and the current .envy; list unused secrets' \
         '  pull          Fetch and rebase local commits onto the remote' \
         '  push          Push local commits, retrying once after a pull' \
@@ -28,7 +29,7 @@ envy_help() (
         'Planned commands (not implemented yet):' \
         '  Secrets:  edit, rm, mv' \
         '  Using:    status' \
-        '  Machine:  config, rekey, doctor, self-update, uninstall'
+        '  Machine:  rekey, doctor, self-update, uninstall'
 )
 
 envy_error() {
@@ -41,6 +42,65 @@ envy_paths() {
     envy_store=$envy_data/store
     envy_identity=$envy_data/identity
     envy_state=${XDG_STATE_HOME:-$HOME/.local/state}/envy
+    envy_config_dir=${XDG_CONFIG_HOME:-$HOME/.config}/envy
+    envy_config_file=$envy_config_dir/config
+}
+
+# Settings are data, never shell code. Do not include input in diagnostics.
+envy_settings_load() {
+    envy_ambient=on
+    envy_quiet=off
+    envy_sync_interval=14400
+    if [ -e "$envy_config_file" ]; then
+        if [ ! -f "$envy_config_file" ] || [ ! -r "$envy_config_file" ]; then
+            envy_error 'cannot read machine settings'
+        fi
+        while IFS= read -r envy_setting || [ -n "$envy_setting" ]; do
+            case $envy_setting in
+                ambient=on|ambient=off) envy_ambient=${envy_setting#*=} ;;
+                quiet=on|quiet=off) envy_quiet=${envy_setting#*=} ;;
+                sync_interval=*)
+                    envy_sync_interval=${envy_setting#*=}
+                    case $envy_sync_interval in
+                        ''|*[!0-9]*) envy_error 'invalid machine settings' ;;
+                    esac
+                    ;;
+                ''|'#'*) ;;
+                *) envy_error 'invalid machine settings' ;;
+            esac
+        done < "$envy_config_file"
+    fi
+}
+
+envy_settings_print() {
+    printf 'ambient=%s\nquiet=%s\nsync_interval=%s\n' \
+        "$envy_ambient" "$envy_quiet" "$envy_sync_interval"
+}
+
+envy_config() {
+    if [ "$#" -eq 0 ]; then
+        envy_paths
+        envy_settings_load
+        envy_settings_print
+        return
+    fi
+    [ "$#" -eq 2 ] || envy_error 'usage: envy config [ambient|quiet on|off]'
+    case $1:$2 in
+        ambient:on|ambient:off|quiet:on|quiet:off) ;;
+        *) envy_error 'usage: envy config [ambient|quiet on|off]' ;;
+    esac
+    # Share the machine lock to serialize settings updates, even before init.
+    envy_begin
+    envy_settings_load
+    case $1 in
+        ambient) envy_ambient=$2 ;;
+        quiet) envy_quiet=$2 ;;
+    esac
+    mkdir -p "$envy_config_dir" || envy_error 'cannot create settings directory'
+    envy_temp=$(mktemp -d "$envy_config_dir/.config.XXXXXX") ||
+        envy_error 'cannot create temporary directory'
+    envy_settings_print > "$envy_temp/config" || envy_error 'cannot write machine settings'
+    mv "$envy_temp/config" "$envy_config_file" || envy_error 'cannot save machine settings'
 }
 
 envy_cleanup() {
@@ -1010,11 +1070,13 @@ _envy_unload() {
 }
 _envy_hook() {
     _ENVY_STATUS=$?
-    if [ "${_ENVY_PWD-}" != "$PWD" ]; then
+    if [ "${_ENVY_PWD-}" != "$PWD" ] ||
+        [ "${_ENVY_AMBIENT_OVERRIDE-}" != "${ENVY_AMBIENT-}" ]; then
         _ENVY_PWD=$PWD
+        _ENVY_AMBIENT_OVERRIDE=${ENVY_AMBIENT-}
         _ENVY_UNLOAD_COUNT=0
         _ENVY_LOAD_COUNT=0
-        if ! _ENVY_CODE=$(command envy hook-env); then
+        if ! _ENVY_CODE=$(ENVY_AMBIENT=${ENVY_AMBIENT-} command envy hook-env); then
             _ENVY_CODE='_envy_unload; unset _ENVY_FP'
         fi
         if ! eval "$_ENVY_CODE" 2> /dev/null; then
@@ -1023,11 +1085,13 @@ _envy_hook() {
             printf '%s\n' 'envy: could not export project environment' >&2
         fi
         unset -f _envy_apply 2> /dev/null || :
-        if [ "$_ENVY_UNLOAD_COUNT" -gt 0 ]; then
-            printf 'envy: unloaded %s vars\n' "$_ENVY_UNLOAD_COUNT" >&2
-        fi
-        if [ "$_ENVY_LOAD_COUNT" -gt 0 ]; then
-            printf 'envy: loaded %s vars\n' "$_ENVY_LOAD_COUNT" >&2
+        if [ "${_ENVY_QUIET-off}" != on ]; then
+            if [ "$_ENVY_UNLOAD_COUNT" -gt 0 ]; then
+                printf 'envy: unloaded %s vars\n' "$_ENVY_UNLOAD_COUNT" >&2
+            fi
+            if [ "$_ENVY_LOAD_COUNT" -gt 0 ]; then
+                printf 'envy: loaded %s vars\n' "$_ENVY_LOAD_COUNT" >&2
+            fi
         fi
         unset _ENVY_CODE
     fi
@@ -1061,7 +1125,7 @@ envy_hook_resolve() (
     envy_environment_snapshot
     envy_revision=$(git -C "$envy_store" rev-parse HEAD) || envy_error 'cannot read store revision'
     envy_fingerprint=$(
-        printf '%s\n' "$envy_root" "$envy_selected_project" "$envy_revision" "${envy_inproject_hash-}"
+        printf '%s\n' "$envy_root" "$envy_selected_project" "$envy_revision" "${envy_inproject_hash-}" "$envy_ambient"
         for envy_map in "$envy_store/global" "$envy_store/projects/$envy_selected_project/map"; do
             [ ! -e "$envy_map" ] || git hash-object --stdin < "$envy_map" || exit 1
         done
@@ -1093,6 +1157,18 @@ envy_hook_resolve() (
 envy_hook_env() {
     [ "$#" -eq 0 ] || envy_error 'usage: envy hook-env'
     envy_prepare
+    envy_settings_load
+    printf "_ENVY_QUIET='%s'\n" "$envy_quiet"
+    case ${ENVY_AMBIENT-} in
+        0) envy_ambient=off ;;
+        1) envy_ambient=on ;;
+        '') ;;
+        *) envy_error 'ENVY_AMBIENT must be 0 or 1' ;;
+    esac
+    if [ "$envy_ambient" = off ]; then
+        printf '%s\n' '_envy_unload' 'unset _ENVY_FP'
+        return
+    fi
     envy_temp=$(mktemp -d "${TMPDIR:-/tmp}/envy-hook.XXXXXX") || envy_error 'cannot create temporary directory'
     if envy_hook_resolve > "$envy_temp/code" 2> "$envy_temp/error"; then
         cat "$envy_temp/code"
@@ -1146,7 +1222,7 @@ case ${1-help} in
     pull|push|sync)
         envy_sync_command "$@"
         ;;
-    init|unlock|set|get|ls|project|check|link|unlink|allow)
+    init|unlock|set|get|ls|project|check|link|unlink|allow|config)
         envy_command=$1
         shift
         "envy_$envy_command" "$@"
