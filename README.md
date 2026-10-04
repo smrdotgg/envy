@@ -50,22 +50,34 @@ EDITOR=vi ./envy project edit my-project
 ./envy run --project my-project -- your-command arg
 eval "$(./envy env --project my-project)"
 ./envy project rm my-project
+EDITOR=vi ./envy project edit --global
+./envy project show --global
+./envy run -- your-command arg
+./envy check
 ```
 
-The mapping accepts `ALIAS=SECRET_NAME` and bare `SECRET_NAME` lines. Aliases use
+The mapping accepts `ALIAS=SECRET_NAME`, bare `SECRET_NAME`, and
+`ALIAS=__literal__("text")` lines. Literal text has no escapes or interpolation
+and cannot contain a double quote. Literals and mappings are plaintext in the
+store. Aliases use
 letters, digits and underscores, starting with a letter or underscore; prefixes
 `ENVY_` and `_ENVY_` are reserved. Secret names use uppercase letters, digits and
 underscores, starting with a letter or underscore. Project names follow
 `[a-z0-9][a-z0-9._-]*`. Blank lines and comments starting with `#` are ignored.
-Whitespace around assignments and inline comments are errors. The last assignment
-to an alias wins.
+Whitespace around assignments and inline comments are errors. Global mappings
+apply to every `run` and `env`, including when no project is selected. Layers
+are read in order: global, then the selected central project. The last assignment
+to an alias wins, including repeated aliases within a file.
 
 Project edits validate the entire mapping before saving, committing and pushing.
 Invalid edits leave the previous mapping intact. Syntax errors and missing secrets
 report the file, line and key; `run` launches nothing and `env` emits nothing.
 Exports preserve quotes and all newlines, including trailing newlines. `run`
-returns the command's exit status. Project removal leaves its secrets in the store. Literal values,
-global mappings and automatic project selection are planned for later slices.
+returns the command's exit status. Project removal leaves its secrets in the store.
+`check` validates the global mapping and every central project mapping, reports
+all errors with their file and line, and exits non-zero on errors. It also lists
+unreferenced secrets as information, without decrypting them. Automatic project
+selection and in-project mapping files are planned for later slices.
 
 For command help and version information:
 

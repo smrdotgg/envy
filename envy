@@ -11,9 +11,10 @@ envy_help() (
         '  set NAME      Store a value from a hidden prompt or stdin' \
         '  get NAME      Print a stored value exactly' \
         '  ls            List secret names without decrypting' \
-        '  project ls|show|edit|rm  Manage central project mappings' \
-        '  run --project <name> -- cmd...  Run with a project environment' \
-        '  env --project <name>  Print shell exports for a project' \
+        '  project ls|show|edit|rm  Manage central mappings (show/edit --global)' \
+        '  run [--project <name>] -- cmd...  Run with the layered environment' \
+        '  env [--project <name>]  Print shell exports for the layered environment' \
+        '  check         Validate all store mappings and list unused secrets' \
         '  pull          Fetch and rebase local commits onto the remote' \
         '  push          Push local commits, retrying once after a pull' \
         '  sync          Pull, then push local commits' \
@@ -23,7 +24,7 @@ envy_help() (
         'Planned commands (not implemented yet):' \
         '  Secrets:  edit, rm, mv' \
         '  Projects: link, unlink, allow' \
-        '  Using:    status, check' \
+        '  Using:    status' \
         '  Machine:  hook, config, rekey, doctor, self-update, uninstall'
 )
 
@@ -417,6 +418,7 @@ envy_project_name() {
 
 # Validate and merge without decrypting. The manifest is a set of file-tested
 # secret names; the table is emitted only after every mapping line is valid.
+# Arguments are ordered pairs of input path and diagnostic display path.
 envy_resolve() (
     : > "$envy_temp/names"
     for envy_file in "$envy_store"/secrets/*.age; do
@@ -425,7 +427,13 @@ envy_resolve() (
         printf '%s\n' "${envy_file%.age}" >> "$envy_temp/names"
     done
     : > "$envy_temp/errors"
-    if ENVY_MAP_DISPLAY=$2 ENVY_MAP_ERRORS=$envy_temp/errors LC_ALL=C awk '
+    if ENVY_MAP_ERRORS=$envy_temp/errors ENVY_MAP_REFERENCES=${envy_resolve_references-} LC_ALL=C awk '
+        BEGIN {
+            for (i = 2; i < ARGC; i += 2) {
+                display[ARGV[i]] = ARGV[i + 1]
+                delete ARGV[i + 1]
+            }
+        }
         function error(message, key) {
             # Report only an identifier, never arbitrary mapping text.
             key = "(invalid key)"
@@ -433,7 +441,7 @@ envy_resolve() (
                 key = substr($0, RSTART, RLENGTH)
                 sub(/^[ \t]*/, "", key)
             }
-            print ENVIRON["ENVY_MAP_DISPLAY"] ":" FNR ": " key ": " message > ENVIRON["ENVY_MAP_ERRORS"]
+            print display[FILENAME] ":" FNR ": " key ": " message > ENVIRON["ENVY_MAP_ERRORS"]
             failed = 1
         }
         FILENAME == ARGV[1] { secrets[$0] = 1; next }
@@ -442,30 +450,40 @@ envy_resolve() (
             if ($0 ~ /^[[:space:]]/ || $0 ~ /[[:space:]]$/) {
                 error("leading or trailing whitespace is not allowed"); next
             }
-            count = split($0, parts, "=")
-            alias = parts[1]
-            if (count > 2 || alias !~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+            equal = index($0, "=")
+            alias = (equal ? substr($0, 1, equal - 1) : $0)
+            if (alias !~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
                 error("invalid mapping syntax or alias"); next
             }
             if (alias ~ /^(ENVY_|_ENVY_)/) {
                 error("reserved alias"); next
             }
-            secret = (count == 1 ? alias : parts[2])
-            if (secret !~ /^[A-Z_][A-Z0-9_]*$/) {
-                error("invalid secret name or mapping syntax"); next
-            }
-            if (!(secret in secrets)) {
-                error("secret not found: " secret); next
+            value = (equal ? substr($0, equal + 1) : alias)
+            kind = "secret"
+            if (equal && value ~ /^__literal__\("[^"]*"\)$/) {
+                kind = "literal"
+                value = substr(value, 14, length(value) - 15)
+            } else {
+                if (value !~ /^[A-Z_][A-Z0-9_]*$/) {
+                    error("invalid secret name or mapping syntax"); next
+                }
+                if (ENVIRON["ENVY_MAP_REFERENCES"] != "")
+                    print value >> ENVIRON["ENVY_MAP_REFERENCES"]
+                if (!(value in secrets)) {
+                    error("secret not found: " value); next
+                }
             }
             if (!(alias in values)) order[++total] = alias
-            values[alias] = secret
+            values[alias] = value
+            kinds[alias] = kind
         }
         END {
             if (failed) exit 1
             for (i = 1; i <= total; i++)
-                print order[i] "\tsecret\t" values[order[i]]
+                # Sentinels preserve empty values and tabs through shell read.
+                print order[i] "\t" kinds[order[i]] "\t." values[order[i]] "."
         }
-    ' "$envy_temp/names" "$1"; then
+    ' "$envy_temp/names" "$@"; then
         return 0
     fi
     cat "$envy_temp/errors" >&2
@@ -480,7 +498,9 @@ envy_project() {
         ls) [ "$#" -eq 0 ] || envy_error 'usage: envy project ls' ;;
         show|edit|rm)
             [ "$#" -eq 1 ] || envy_error "usage: envy project $envy_project_action <name>"
-            envy_project_name "$1"
+            if [ "$1" != --global ] || [ "$envy_project_action" = rm ]; then
+                envy_project_name "$1"
+            fi
             ;;
         *) envy_error 'usage: envy project ls|show|edit|rm [name]' ;;
     esac
@@ -488,6 +508,13 @@ envy_project() {
         edit|rm) envy_begin ;;
     esac
     envy_require_store
+    if [ "$envy_project_action" != ls ]; then
+        case $1 in
+            --global) envy_map_path=global ;;
+            *) envy_map_path=projects/$1/map ;;
+        esac
+        envy_map=$envy_store/$envy_map_path
+    fi
     case $envy_project_action in
         ls)
             for envy_project_dir in "$envy_store"/projects/*; do
@@ -496,13 +523,15 @@ envy_project() {
             done
             ;;
         show)
-            [ -f "$envy_store/projects/$1/map" ] || envy_error "project not found: $1"
-            cat "$envy_store/projects/$1/map"
+            if [ "$1" = --global ] && [ ! -e "$envy_map" ]; then
+                return
+            fi
+            [ -f "$envy_map" ] || envy_error "project not found: $1"
+            cat "$envy_map"
             ;;
         edit)
             envy_clean_store
             envy_temp=$(mktemp -d "$envy_data/.project.XXXXXX") || envy_error 'cannot create temporary directory'
-            envy_map=$envy_store/projects/$1/map
             if [ -f "$envy_map" ]; then
                 cp "$envy_map" "$envy_temp/map"
             else
@@ -515,9 +544,9 @@ envy_project() {
             if [ -f "$envy_map" ] && cmp -s "$envy_map" "$envy_temp/map"; then
                 return
             fi
-            mkdir -p "$envy_store/projects/$1"
+            mkdir -p "${envy_map%/*}"
             mv "$envy_temp/map" "$envy_map"
-            git -C "$envy_store" add -- "projects/$1/map"
+            git -C "$envy_store" add -- "$envy_map_path"
             envy_commit_push "project edit $1"
             ;;
         rm)
@@ -532,17 +561,18 @@ envy_project() {
 envy_environment() {
     envy_environment_command=$1
     shift
-    if [ "$#" -lt 2 ] || [ "$1" != --project ]; then
-        envy_error "usage: envy $envy_environment_command --project <name> (run requires -- cmd...)"
+    envy_selected_project=
+    if [ "${1-}" = --project ]; then
+        [ "$#" -ge 2 ] || envy_error "usage: envy $envy_environment_command [--project <name>] (run requires -- cmd...)"
+        envy_project_name "$2"
+        envy_selected_project=$2
+        shift 2
     fi
-    envy_project_name "$2"
-    envy_selected_project=$2
-    shift 2
     case $envy_environment_command in
-        env) [ "$#" -eq 0 ] || envy_error 'usage: envy env --project <name>' ;;
+        env) [ "$#" -eq 0 ] || envy_error 'usage: envy env [--project <name>]' ;;
         run)
             if [ "$#" -lt 2 ] || [ "$1" != -- ]; then
-                envy_error 'usage: envy run --project <name> -- cmd...'
+                envy_error 'usage: envy run [--project <name>] -- cmd...'
             fi
             shift
             envy_inherited_umask=$(umask)
@@ -550,20 +580,33 @@ envy_environment() {
     esac
     envy_prepare
     envy_require_store
-    envy_map=$envy_store/projects/$envy_selected_project/map
-    [ -f "$envy_map" ] || envy_error "project not found: $envy_selected_project"
     envy_temp=$(mktemp -d "$envy_data/.env.XXXXXX") || envy_error 'cannot create temporary directory'
-    envy_resolve "$envy_map" "$envy_map" > "$envy_temp/table" || exit 1
+    # Build layers in a subshell so the child command arguments stay intact.
+    (
+        set --
+        if [ -e "$envy_store/global" ]; then
+            set -- "$@" "$envy_store/global" "$envy_store/global"
+        fi
+        if [ -n "$envy_selected_project" ]; then
+            envy_map=$envy_store/projects/$envy_selected_project/map
+            [ -f "$envy_map" ] || envy_error "project not found: $envy_selected_project"
+            set -- "$@" "$envy_map" "$envy_map"
+        fi
+        envy_resolve "$@"
+    ) > "$envy_temp/table" || exit 1
     : > "$envy_temp/exports"
-    while IFS="$(printf '\t')" read -r envy_alias envy_kind envy_secret; do
-        [ "$envy_kind" = secret ] || envy_error 'unsupported mapping kind'
-        envy_value=$(
-            age -d -i "$envy_identity" "$envy_store/secrets/$envy_secret.age" 2> /dev/null || exit 1
-            printf '.'
-        ) ||
-            envy_error "could not decrypt secret: $envy_secret"
-        # A sentinel keeps command substitution from stripping value newlines.
+    while IFS="$(printf '\t')" read -r envy_alias envy_kind envy_value; do
+        envy_value=${envy_value#.}
         envy_value=${envy_value%.}
+        if [ "$envy_kind" = secret ]; then
+            envy_secret=$envy_value
+            envy_value=$(
+                age -d -i "$envy_identity" "$envy_store/secrets/$envy_secret.age" 2> /dev/null || exit 1
+                printf '.'
+            ) || envy_error "could not decrypt secret: $envy_secret"
+            # A sentinel keeps command substitution from stripping newlines.
+            envy_value=${envy_value%.}
+        fi
         # Give sed a final newline even for an unterminated value, then remove
         # just that added newline so BSD and GNU sed produce the same result.
         envy_quoted=$(printf '%s\n' "$envy_value" | LC_ALL=C sed "s/'/'\\\\''/g"; printf '.')
@@ -590,6 +633,29 @@ envy_environment() {
     esac
 }
 
+envy_check() {
+    [ "$#" -eq 0 ] || envy_error 'usage: envy check'
+    envy_prepare
+    envy_require_store
+    envy_temp=$(mktemp -d "$envy_data/.check.XXXXXX") || envy_error 'cannot create temporary directory'
+    envy_resolve_references=$envy_temp/references
+    : > "$envy_resolve_references"
+    envy_resolve > /dev/null || exit 1
+    envy_check_failed=0
+    for envy_map in "$envy_store/global" "$envy_store"/projects/*/map; do
+        [ -e "$envy_map" ] || continue
+        if ! envy_resolve "$envy_map" "$envy_map" > /dev/null; then
+            envy_check_failed=1
+        fi
+    done
+    # References include overwritten assignments, but exclude literal text.
+    LC_ALL=C awk '
+        FILENAME == ARGV[1] { referenced[$0] = 1; next }
+        !($0 in referenced) { print "envy: unreferenced secret: " $0 }
+    ' "$envy_resolve_references" "$envy_temp/names"
+    return "$envy_check_failed"
+}
+
 case ${1-help} in
     run|env)
         envy_environment "$@"
@@ -597,7 +663,7 @@ case ${1-help} in
     pull|push|sync)
         envy_sync_command "$@"
         ;;
-    init|unlock|set|get|ls|project)
+    init|unlock|set|get|ls|project|check)
         envy_command=$1
         shift
         "envy_$envy_command" "$@"

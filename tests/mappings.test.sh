@@ -161,7 +161,7 @@ Alias|Alias=SECRET=SECRET
 ENVY_STATE|ENVY_STATE=SECRET
 _ENVY_PRIVATE|_ENVY_PRIVATE=SECRET
 ENVY_SECRET|ENVY_SECRET
-Alias|Alias=__literal__("deferred")
+Alias|Alias=__literal__("malformed"
 Alias|Alias=MISSING
 lower|lower
 (invalid key)|=SECRET
@@ -225,7 +225,7 @@ for command in env run; do
 done
 mv "$XDG_DATA_HOME/envy/saved-identity" "$XDG_DATA_HOME/envy/identity"
 
-for args in 'env' 'env --project' 'env demo' 'env --project absent' 'env --project demo extra' \
+for args in 'env --project' 'env demo' 'env --project absent' 'env --project demo extra' \
     'run' 'run --project' 'run --project demo' 'run --project demo --' 'run --project demo dash' \
     'run --project ../escape -- true' 'run --project absent -- true'; do
     if printf '%s\n' "$args" | xargs "$ENVY_BIN" > args.out 2> args.err; then
