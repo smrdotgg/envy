@@ -11,6 +11,9 @@ envy_help() (
         '  set NAME      Store a value from a hidden prompt or stdin' \
         '  get NAME      Print a stored value exactly' \
         '  ls            List secret names without decrypting' \
+        '  pull          Fetch and rebase local commits onto the remote' \
+        '  push          Push local commits, retrying once after a pull' \
+        '  sync          Pull, then push local commits' \
         '  version       Print the envy version' \
         '  help          Show this help' \
         '' \
@@ -18,7 +21,6 @@ envy_help() (
         '  Secrets:  edit, rm, mv' \
         '  Projects: project ls|show|edit|rm, link, unlink, allow' \
         '  Using:    run, env, status, check' \
-        '  Sync:     pull, push, sync' \
         '  Machine:  hook, config, rekey, doctor, self-update, uninstall'
 )
 
@@ -31,6 +33,67 @@ envy_paths() {
     envy_data=${XDG_DATA_HOME:-$HOME/.local/share}/envy
     envy_store=$envy_data/store
     envy_identity=$envy_data/identity
+    envy_state=${XDG_STATE_HOME:-$HOME/.local/state}/envy
+}
+
+envy_cleanup() {
+    trap '' HUP INT TERM
+    [ -z "$envy_tty_state" ] || stty "$envy_tty_state" 2> /dev/null || :
+    [ -z "$envy_temp" ] || rm -rf "$envy_temp"
+    [ -z "$envy_stage" ] || rm -rf "$envy_stage"
+    if [ "$envy_rebasing" = yes ] &&
+        { [ -d "$envy_store/.git/rebase-merge" ] || [ -d "$envy_store/.git/rebase-apply" ]; }; then
+        git -C "$envy_store" rebase --abort > /dev/null 2>&1 || :
+    fi
+    # Only remove our own owner record and an empty lock, never another owner.
+    rmdir "$envy_lock/$$" 2> /dev/null || :
+    rmdir "$envy_lock" 2> /dev/null || :
+}
+
+envy_begin() {
+    envy_paths
+    umask 077
+    envy_tty_state=
+    envy_temp=
+    envy_stage=
+    envy_rebasing=no
+    envy_lock=$envy_state/lock
+    trap 'envy_cleanup' 0
+    trap 'exit 1' HUP INT TERM
+    mkdir -p "$envy_state"
+    envy_lock_started=$(date +%s)
+    while :; do
+        if mkdir "$envy_lock" 2> /dev/null; then
+            # The PID directory is the owner record. Unlike a pid file it can
+            # be reclaimed with rmdir, without deleting a replacement owner's
+            # record when several processes recover the same stale lock.
+            if mkdir "$envy_lock/$$" 2> /dev/null; then
+                set -- "$envy_lock"/*
+                # An empty lock might have been reclaimed before we published
+                # our PID. Proceed only if we are its sole owner.
+                if [ "$#" -eq 1 ] && [ "$1" = "$envy_lock/$$" ]; then
+                    return
+                fi
+                rmdir "$envy_lock/$$" 2> /dev/null || :
+            fi
+        else
+            for envy_owner in "$envy_lock"/*; do
+                [ -d "$envy_owner" ] || continue
+                envy_pid=${envy_owner##*/}
+                case $envy_pid in ''|*[!0-9]*|0) continue ;; esac
+                if ! kill -0 "$envy_pid" 2> /dev/null; then
+                    rmdir "$envy_owner" 2> /dev/null || :
+                fi
+            done
+        fi
+        if rmdir "$envy_lock" 2> /dev/null; then
+            continue
+        fi
+        if [ "$(($(date +%s) - envy_lock_started))" -ge 30 ]; then
+            envy_error 'store busy; another envy process holds the lock'
+        fi
+        sleep 1
+    done
 }
 
 envy_dependencies() {
@@ -93,14 +156,11 @@ envy_recover_identity() {
 envy_unlock() {
     [ "$#" -eq 0 ] || envy_error 'usage: envy unlock'
     envy_dependencies
-    envy_paths
+    envy_begin
     envy_validate_store "$envy_store"
     [ ! -d "$envy_identity" ] ||
         envy_error 'local identity path is a directory; move it aside and run envy unlock'
-    umask 077
     envy_stage=$(mktemp -d "$envy_data/.unlock.XXXXXX") || envy_error 'cannot create temporary directory'
-    trap 'trap "" HUP INT TERM; rm -rf "$envy_stage"' 0
-    trap 'exit 1' HUP INT TERM
     envy_recover_identity "$envy_store" "$envy_stage/identity"
     mv "$envy_stage/identity" "$envy_identity"
 }
@@ -114,26 +174,151 @@ envy_git_identity() {
     fi
 }
 
+envy_clean_store() {
+    if [ -n "$(git -C "$envy_store" status --porcelain)" ] ||
+        [ -d "$envy_store/.git/rebase-merge" ] ||
+        [ -d "$envy_store/.git/rebase-apply" ] ||
+        [ -f "$envy_store/.git/MERGE_HEAD" ]; then
+        envy_error 'store has uncommitted changes or an unfinished operation; resolve them before writing or syncing'
+    fi
+}
+
+envy_fetch_rebase() {
+    envy_sync_failure=
+    envy_pull_changed=no
+    envy_branch=$(git -C "$envy_store" symbolic-ref --quiet --short HEAD) || {
+        envy_sync_failure=branch
+        return 1
+    }
+    if ! git -C "$envy_store" fetch --quiet origin "$envy_branch" > /dev/null 2>&1; then
+        envy_sync_failure=offline
+        return 1
+    fi
+    date +%s > "$envy_state/last-fetch" || {
+        envy_sync_failure=state
+        return 1
+    }
+    envy_before=$(git -C "$envy_store" rev-parse HEAD) || {
+        envy_sync_failure=rebase
+        return 1
+    }
+    # Disable autostash so a user's git configuration cannot hide dirty state.
+    envy_rebasing=yes
+    if ! git -C "$envy_store" -c rebase.autoStash=false -c rebase.updateRefs=false \
+        rebase --quiet FETCH_HEAD > /dev/null 2>&1; then
+        if [ -d "$envy_store/.git/rebase-merge" ] || [ -d "$envy_store/.git/rebase-apply" ]; then
+            git -C "$envy_store" rebase --abort > /dev/null 2>&1 ||
+                envy_error 'could not abort the rebase; the store needs manual recovery'
+            envy_sync_failure=conflict
+        else
+            envy_sync_failure=rebase
+        fi
+        envy_rebasing=no
+        return 1
+    fi
+    envy_rebasing=no
+    envy_after=$(git -C "$envy_store" rev-parse HEAD) || {
+        envy_sync_failure=rebase
+        return 1
+    }
+    if [ "$envy_before" != "$envy_after" ]; then
+        envy_pull_changed=yes
+    fi
+}
+
+envy_push_once() {
+    if envy_push_output=$(git -C "$envy_store" push --porcelain origin HEAD 2> /dev/null); then
+        if printf '%s\n' "$envy_push_output" |
+            awk -F '\t' '$1 == "=" { found = 1 } END { exit !found }'; then
+            envy_push_changed=no
+        else
+            envy_push_changed=yes
+        fi
+        return 0
+    fi
+    envy_sync_failure=push
+    return 1
+}
+
+envy_push_retry() {
+    envy_pull_changed=no
+    envy_push_once && return 0
+    envy_fetch_rebase || return 1
+    envy_push_once
+}
+
+envy_sync_error() {
+    case $envy_sync_failure in
+        conflict) envy_error 'sync conflict; rebase aborted and local commits retained; reconcile the conflicting changes before retrying' ;;
+        offline) envy_error 'remote unavailable; local commits retained; run envy sync when online' ;;
+        branch) envy_error 'cannot sync a detached HEAD; check out the store branch first' ;;
+        rebase) envy_error 'could not rebase store; local commits retained' ;;
+        state) envy_error 'could not record fetch time; check local state directory permissions' ;;
+        *) envy_error 'push failed after one retry; local commits retained; run envy sync to retry' ;;
+    esac
+}
+
 envy_commit_push() {
     envy_git_identity
     git -C "$envy_store" commit --quiet -m "$1" > /dev/null 2>&1 ||
         envy_error 'could not commit store changes'
-    git -C "$envy_store" push --quiet origin HEAD > /dev/null 2>&1 ||
-        envy_error 'push failed; local commit retained'
+    if ! envy_push_retry; then
+        case $envy_sync_failure in
+            offline|push)
+                printf '%s\n' 'envy: warning: push failed; local commit retained; run envy sync when the remote is available' >&2
+                ;;
+            *) envy_sync_error ;;
+        esac
+    fi
+}
+
+envy_report_pull() {
+    case $envy_pull_changed in
+        yes) printf '%s\n' 'envy: pulled remote changes (rebased local commits)' ;;
+        no) printf '%s\n' 'envy: local store already up to date' ;;
+    esac
+}
+
+envy_report_push() {
+    case $envy_push_changed in
+        yes) printf '%s\n' 'envy: pushed local commits' ;;
+        no) printf '%s\n' 'envy: remote already up to date' ;;
+    esac
+}
+
+envy_sync_command() {
+    envy_sync_command_name=$1
+    shift
+    [ "$#" -eq 0 ] || envy_error "usage: envy $envy_sync_command_name"
+    envy_dependencies
+    envy_begin
+    envy_validate_store "$envy_store"
+    envy_clean_store
+    envy_git_identity
+    case $envy_sync_command_name in
+        pull|sync)
+            envy_fetch_rebase || envy_sync_error
+            envy_report_pull
+            ;;
+    esac
+    case $envy_sync_command_name in
+        push|sync)
+            envy_push_retry || envy_sync_error
+            [ "$envy_pull_changed" = no ] || envy_report_pull
+            envy_report_push
+            ;;
+    esac
 }
 
 envy_init() {
     [ "$#" -eq 1 ] || envy_error 'usage: envy init <url>'
     envy_dependencies
-    envy_paths
+    envy_begin
     if [ -e "$envy_store" ] || [ -e "$envy_identity" ]; then
         envy_error 'local store or identity already exists'
     fi
-    umask 077
     mkdir -p "$envy_data"
     envy_stage=$(mktemp -d "$envy_data/.init.XXXXXX") || envy_error 'cannot create temporary directory'
-    trap 'trap "" HUP INT TERM; rm -rf "$envy_stage"' 0
-    trap 'exit 1' HUP INT TERM
     git clone --quiet -- "$1" "$envy_stage/store" > /dev/null 2>&1 ||
         envy_error 'could not clone store repository'
     envy_existing_refs=$(git -C "$envy_stage/store" for-each-ref --format='%(refname)' 2> /dev/null) ||
@@ -143,6 +328,7 @@ envy_init() {
         envy_recover_identity "$envy_stage/store" "$envy_stage/identity"
         mv "$envy_stage/store" "$envy_store"
         mv "$envy_stage/identity" "$envy_identity"
+        envy_git_identity
         return
     fi
     # age owns the terminal passphrase prompt, including its blank-input generator.
@@ -162,13 +348,10 @@ envy_init() {
 envy_set() {
     [ "$#" -eq 1 ] || envy_error 'usage: envy set NAME; supply the value through the prompt or stdin'
     envy_name "$1"
+    envy_begin
     envy_require_store
-    umask 077
+    envy_clean_store
     envy_temp=$(mktemp -d "$envy_data/.set.XXXXXX") || envy_error 'cannot create temporary directory'
-    envy_tty_state=
-    # Ignore further interrupts during cleanup, even if the terminal has disconnected.
-    trap 'trap "" HUP INT TERM; [ -z "$envy_tty_state" ] || stty "$envy_tty_state" 2> /dev/null || :; rm -rf "$envy_temp"' 0
-    trap 'exit 1' HUP INT TERM
     if [ -t 0 ]; then
         envy_tty_state=$(stty -g) || envy_error 'cannot read terminal settings'
         stty -echo || envy_error 'cannot hide terminal input'
@@ -212,6 +395,9 @@ envy_ls() (
 )
 
 case ${1-help} in
+    pull|push|sync)
+        envy_sync_command "$@"
+        ;;
     init|unlock|set|get|ls)
         envy_command=$1
         shift

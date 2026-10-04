@@ -20,7 +20,25 @@ The local decrypted identity is stored with mode `0600` under
 `${XDG_DATA_HOME:-$HOME/.local/share}/envy`, alongside the store clone. `set` reads
 one line from a hidden terminal prompt, or preserves the exact bytes of piped
 stdin. Values cannot be supplied as arguments. Each write creates one commit and
-pushes it immediately. More advanced sync is planned for later slices.
+pushes it immediately. If another machine has pushed first, envy pulls with
+rebase and retries the push once. Offline writes succeed locally with a warning;
+run `sync` when the remote is available to send those commits.
+
+```sh
+./envy pull   # fetch and rebase local commits onto the remote
+./envy push   # push local commits, with one pull/rebase retry
+./envy sync   # pull, then push
+```
+
+These commands report whether they updated the store and fail if the remote is
+unavailable. If both machines changed the same secret, envy aborts the rebase,
+preserves the local commit and value, and exits with an explanation. Reconcile
+the conflicting changes before retrying. Writes and sync refuse a dirty store.
+Missing Git author settings are supplied in the store clone only.
+
+Store mutations share a lock under
+`${XDG_STATE_HOME:-$HOME/.local/state}/envy`; dead owners are cleared automatically.
+Reads use the local store without waiting for that lock or contacting the remote.
 
 For command help and version information:
 
