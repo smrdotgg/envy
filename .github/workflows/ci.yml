@@ -15,9 +15,9 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update
-            sudo apt-get install -y age dash shellcheck python3
+            sudo apt-get install -y age dash shellcheck python3 bash zsh
           else
-            brew install age dash shellcheck python3
+            brew install age dash shellcheck python3 zsh
           fi
       - name: Run gate
         run: |

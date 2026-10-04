@@ -17,6 +17,7 @@ envy_help() (
         '  allow         Review and approve the current project .envy on this machine' \
         '  run [--project <name>] -- cmd...  Run with the layered environment' \
         '  env [--project <name>]  Print shell exports for the layered environment' \
+        '  hook          Print the bash/zsh ambient hook for eval' \
         '  check         Validate store mappings and the current .envy; list unused secrets' \
         '  pull          Fetch and rebase local commits onto the remote' \
         '  push          Push local commits, retrying once after a pull' \
@@ -27,7 +28,7 @@ envy_help() (
         'Planned commands (not implemented yet):' \
         '  Secrets:  edit, rm, mv' \
         '  Using:    status' \
-        '  Machine:  hook, config, rekey, doctor, self-update, uninstall'
+        '  Machine:  config, rekey, doctor, self-update, uninstall'
 )
 
 envy_error() {
@@ -152,8 +153,8 @@ envy_check_identity() (
 
 envy_require_store() {
     envy_paths
-    envy_validate_store "$envy_store"
-    envy_dependencies
+    envy_validate_store "$envy_store" || return 1
+    envy_dependencies || return 1
     envy_check_identity "$envy_store" "$envy_identity"
 }
 
@@ -875,6 +876,59 @@ envy_project() {
     esac
 }
 
+envy_environment_snapshot() {
+    envy_snapshot_project || exit 1
+    if [ -n "$envy_inproject" ] && ! envy_project_approved; then
+        envy_error "$envy_inproject: unapproved or changed mapping; run envy allow"
+    fi
+}
+
+envy_environment_table() {
+    # Build layers in a subshell so the child command arguments stay intact.
+    (
+        set --
+        if [ -e "$envy_store/global" ]; then
+            set -- "$@" "$envy_store/global" "$envy_store/global"
+        fi
+        if [ -n "$envy_selected_project" ]; then
+            envy_map=$envy_store/projects/$envy_selected_project/map
+            [ -f "$envy_map" ] || envy_error "project not found: $envy_selected_project"
+            set -- "$@" "$envy_map" "$envy_map"
+        fi
+        if [ -n "$envy_inproject" ]; then
+            set -- "$@" "$envy_temp/in-project" "$envy_inproject"
+        fi
+        envy_resolve "$@"
+    ) > "$envy_temp/table" || exit 1
+}
+
+envy_environment_exports() {
+    : > "$envy_temp/exports"
+    while IFS="$(printf '\t')" read -r envy_alias envy_kind envy_value; do
+        envy_value=${envy_value#.}
+        envy_value=${envy_value%.}
+        if [ "$envy_kind" = secret ]; then
+            envy_secret=$envy_value
+            envy_value=$(
+                age -d -i "$envy_identity" "$envy_store/secrets/$envy_secret.age" 2> /dev/null || exit 1
+                printf '.'
+            ) || envy_error "could not decrypt secret: $envy_secret"
+            # A sentinel keeps command substitution from stripping newlines.
+            envy_value=${envy_value%.}
+        fi
+        # Give sed a final newline even for an unterminated value, then remove
+        # just that added newline so BSD and GNU sed produce the same result.
+        envy_quoted=$(printf '%s\n' "$envy_value" | LC_ALL=C sed "s/'/'\\\\''/g"; printf '.')
+        envy_quoted=${envy_quoted%.}
+        envy_quoted=${envy_quoted%?}
+        if [ "${envy_environment_command-}" = hook ]; then
+            printf "export %s='%s' || return 1\n" "$envy_alias" "$envy_quoted" >> "$envy_temp/exports"
+        else
+            printf "export %s='%s'\n" "$envy_alias" "$envy_quoted" >> "$envy_temp/exports"
+        fi
+    done < "$envy_temp/table"
+}
+
 envy_environment() {
     envy_environment_command=$1
     shift
@@ -903,46 +957,9 @@ envy_environment() {
     else
         envy_directory_root
     fi
-    envy_snapshot_project || exit 1
-    if [ -n "$envy_inproject" ] && ! envy_project_approved; then
-        envy_error "$envy_inproject: unapproved or changed mapping; run envy allow"
-    fi
-    # Build layers in a subshell so the child command arguments stay intact.
-    (
-        set --
-        if [ -e "$envy_store/global" ]; then
-            set -- "$@" "$envy_store/global" "$envy_store/global"
-        fi
-        if [ -n "$envy_selected_project" ]; then
-            envy_map=$envy_store/projects/$envy_selected_project/map
-            [ -f "$envy_map" ] || envy_error "project not found: $envy_selected_project"
-            set -- "$@" "$envy_map" "$envy_map"
-        fi
-        if [ -n "$envy_inproject" ]; then
-            set -- "$@" "$envy_temp/in-project" "$envy_inproject"
-        fi
-        envy_resolve "$@"
-    ) > "$envy_temp/table" || exit 1
-    : > "$envy_temp/exports"
-    while IFS="$(printf '\t')" read -r envy_alias envy_kind envy_value; do
-        envy_value=${envy_value#.}
-        envy_value=${envy_value%.}
-        if [ "$envy_kind" = secret ]; then
-            envy_secret=$envy_value
-            envy_value=$(
-                age -d -i "$envy_identity" "$envy_store/secrets/$envy_secret.age" 2> /dev/null || exit 1
-                printf '.'
-            ) || envy_error "could not decrypt secret: $envy_secret"
-            # A sentinel keeps command substitution from stripping newlines.
-            envy_value=${envy_value%.}
-        fi
-        # Give sed a final newline even for an unterminated value, then remove
-        # just that added newline so BSD and GNU sed produce the same result.
-        envy_quoted=$(printf '%s\n' "$envy_value" | LC_ALL=C sed "s/'/'\\\\''/g"; printf '.')
-        envy_quoted=${envy_quoted%.}
-        envy_quoted=${envy_quoted%?}
-        printf "export %s='%s'\n" "$envy_alias" "$envy_quoted" >> "$envy_temp/exports"
-    done < "$envy_temp/table"
+    envy_environment_snapshot
+    envy_environment_table || exit 1
+    envy_environment_exports || exit 1
     case $envy_environment_command in
         env) cat "$envy_temp/exports" ;;
         run)
@@ -960,6 +977,127 @@ envy_environment() {
             exec "$@"
             ;;
     esac
+}
+
+envy_hook() {
+    [ "$#" -eq 0 ] || envy_error 'usage: envy hook'
+    cat <<'HOOK'
+_envy_unload() {
+    _ENVY_UNLOAD_COUNT=0
+    _ENVY_LOAD_COUNT=0
+    _ENVY_REMAINING=${_ENVY_VARS-}
+    while [ -n "$_ENVY_REMAINING" ]; do
+        _ENVY_ALIAS=${_ENVY_REMAINING%% *}
+        case $_ENVY_REMAINING in
+            *' '*) _ENVY_REMAINING=${_ENVY_REMAINING#* } ;;
+            *) _ENVY_REMAINING= ;;
+        esac
+        case $_ENVY_ALIAS in
+            ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*|ENVY_*|_ENVY_*) continue ;;
+        esac
+        if eval '[ "${_ENVY_SAVED_'"$_ENVY_ALIAS"'+x}" = x ]'; then
+            eval 'export '"$_ENVY_ALIAS"'="${_ENVY_SAVED_'"$_ENVY_ALIAS"'}"' 2> /dev/null || :
+            unset "_ENVY_SAVED_$_ENVY_ALIAS"
+        else
+            unset "$_ENVY_ALIAS"
+        fi
+        _ENVY_UNLOAD_COUNT=$((_ENVY_UNLOAD_COUNT + 1))
+    done
+    unset _ENVY_VARS
+}
+_envy_hook() {
+    _ENVY_STATUS=$?
+    if [ "${_ENVY_PWD-}" != "$PWD" ]; then
+        _ENVY_PWD=$PWD
+        _ENVY_UNLOAD_COUNT=0
+        _ENVY_LOAD_COUNT=0
+        if ! _ENVY_CODE=$(command envy hook-env); then
+            _ENVY_CODE='_envy_unload; unset _ENVY_FP'
+        fi
+        if ! eval "$_ENVY_CODE" 2> /dev/null; then
+            _envy_unload
+            unset _ENVY_FP
+            printf '%s\n' 'envy: could not export project environment' >&2
+        fi
+        unset -f _envy_apply 2> /dev/null || :
+        if [ "$_ENVY_UNLOAD_COUNT" -gt 0 ]; then
+            printf 'envy: unloaded %s vars\n' "$_ENVY_UNLOAD_COUNT" >&2
+        fi
+        if [ "$_ENVY_LOAD_COUNT" -gt 0 ]; then
+            printf 'envy: loaded %s vars\n' "$_ENVY_LOAD_COUNT" >&2
+        fi
+        unset _ENVY_CODE
+    fi
+    return "$_ENVY_STATUS"
+}
+envy() {
+    if command envy "$@"; then _ENVY_COMMAND_STATUS=0; else _ENVY_COMMAND_STATUS=$?; fi
+    unset _ENVY_PWD
+    return "$_ENVY_COMMAND_STATUS"
+}
+if [ -z "${_ENVY_HOOK_INSTALLED-}" ]; then
+    if [ -n "${ZSH_VERSION-}" ]; then
+        autoload -Uz add-zsh-hook
+        add-zsh-hook precmd _envy_hook
+        _ENVY_HOOK_INSTALLED=1
+    elif [ -n "${BASH_VERSION-}" ]; then
+        PROMPT_COMMAND="_envy_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+        _ENVY_HOOK_INSTALLED=1
+    fi
+fi
+HOOK
+}
+
+# The fingerprint uses metadata only; subdirectory transitions never decrypt.
+# Keep emitted code buffered until trust, mappings and every decryption succeed.
+envy_hook_resolve() (
+    envy_require_store || exit 1
+    envy_environment_command=hook
+    envy_selected_project=
+    envy_directory_project
+    envy_environment_snapshot
+    envy_revision=$(git -C "$envy_store" rev-parse HEAD) || envy_error 'cannot read store revision'
+    envy_fingerprint=$(
+        printf '%s\n' "$envy_root" "$envy_selected_project" "$envy_revision" "${envy_inproject_hash-}"
+        for envy_map in "$envy_store/global" "$envy_store/projects/$envy_selected_project/map"; do
+            [ ! -e "$envy_map" ] || git hash-object --stdin < "$envy_map" || exit 1
+        done
+    ) || envy_error 'cannot fingerprint mappings'
+    envy_fingerprint=$(printf '%s\n' "$envy_fingerprint" | git hash-object --stdin) ||
+        envy_error 'cannot fingerprint environment'
+    [ "$envy_fingerprint" != "${_ENVY_FP-}" ] || exit 0
+    envy_environment_table || exit 1
+    envy_environment_exports || exit 1
+    printf '%s\n' '_envy_unload'
+    envy_vars=
+    envy_count=0
+    while IFS="$(printf '\t')" read -r envy_alias envy_kind envy_value; do
+        # Capture originals in the parent shell, where even unexported values
+        # are visible. Identifier validation happens in the mapping resolver.
+        printf "if [ \"\${%s+x}\" = x ]; then export _ENVY_SAVED_%s=\"\$%s\"; fi\n" \
+            "$envy_alias" "$envy_alias" "$envy_alias"
+        envy_vars=${envy_vars:+$envy_vars }$envy_alias
+        envy_count=$((envy_count + 1))
+    done < "$envy_temp/table"
+    printf "export _ENVY_VARS='%s'\n" "$envy_vars"
+    printf '%s\n' '_envy_apply() {'
+    cat "$envy_temp/exports"
+    printf "export _ENVY_FP='%s'\n" "$envy_fingerprint"
+    printf '_ENVY_LOAD_COUNT=%s\n' "$envy_count"
+    printf '%s\n' '}' '_envy_apply'
+)
+
+envy_hook_env() {
+    [ "$#" -eq 0 ] || envy_error 'usage: envy hook-env'
+    envy_prepare
+    envy_temp=$(mktemp -d "${TMPDIR:-/tmp}/envy-hook.XXXXXX") || envy_error 'cannot create temporary directory'
+    if envy_hook_resolve > "$envy_temp/code" 2> "$envy_temp/error"; then
+        cat "$envy_temp/code"
+    else
+        # One diagnostic per failed evaluation, even for many mapping errors.
+        LC_ALL=C awk 'NR == 1 { print; exit }' "$envy_temp/error" >&2
+        printf '%s\n' '_envy_unload' 'unset _ENVY_FP'
+    fi
 }
 
 envy_check() {
@@ -1009,6 +1147,14 @@ case ${1-help} in
         envy_command=$1
         shift
         "envy_$envy_command" "$@"
+        ;;
+    hook)
+        shift
+        envy_hook "$@"
+        ;;
+    hook-env)
+        shift
+        envy_hook_env "$@"
         ;;
     version|help)
         if [ "$#" -gt 1 ]; then

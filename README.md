@@ -128,6 +128,24 @@ file and line and exits non-zero on errors. It also reports
 remotes listed under more than one project and lists unreferenced secrets as
 information, without decrypting them.
 
+Evaluate the ambient hook by hand in bash or zsh:
+
+```sh
+eval "$(envy hook)"
+```
+
+At the next prompt, entering a project loads its layered environment. Leaving
+restores pre-existing values and unsets other managed variables; moving to
+another project swaps the environment. Global mappings apply outside projects
+too. Loads, unloads and errors each print one line to stderr. A mapping, approval
+or decryption error unloads the previous environment and loads nothing.
+
+The hook checks again after changing directory or invoking `envy`, while
+transitions between subdirectories of the same project skip decryption when
+the mapping and store revision are unchanged. It preserves the previous
+command's exit status and registering it twice is harmless. Startup-file
+installation, ambient settings and background refresh are planned slices.
+
 For command help and version information:
 
 ```sh
@@ -137,8 +155,8 @@ For command help and version information:
 
 Run the development checks with `shellcheck -s sh envy` (also include
 `install.sh` when present), then `dash tests/run.sh`.
-Tests need git, age and age-keygen, dash, and Python 3. Python is used only by
-the test harness to answer real age passphrase prompts through a controlling
+Tests need git, age and age-keygen, dash, bash, zsh, and Python 3. Python is used
+only by the test harness to answer real age passphrase prompts through a controlling
 pseudo-terminal. Responses are supplied on stdin and terminal output is hidden;
 the helper times out instead of waiting indefinitely.
 
