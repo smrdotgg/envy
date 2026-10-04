@@ -591,9 +591,9 @@ envy_rekey() {
     envy_rekey_restore=no
     printf '%s\n' 'envy: rekeyed store; rotate these secrets at their providers:'
     cat "$envy_store/rotation-pending"
-    # Never rebase a rekey onto a concurrent old-key write. Keep the coherent
-    # local commit/key if the push fails; ordinary sync checks key divergence.
-    envy_push_once || envy_error 'rekey push failed; new local identity and commit retained; run envy push to retry, reconciling any divergent remote history first'
+    # Retry ordinary push failures; the sync engine refuses a rebase onto
+    # divergent old-key writes and preserves the coherent local commit/key.
+    envy_push_retry || envy_error 'rekey push failed; new local identity and commit retained; run envy push to retry, reconciling any divergent remote history first'
 }
 
 # Stage bookkeeping before mutating ciphertext, so unreadable metadata fails

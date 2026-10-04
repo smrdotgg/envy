@@ -54,7 +54,6 @@ use_home second
 python3 "$TEST_ROOT/tests/pty-helper.py" -- "$ENVY_BIN" init "$TEST_REMOTE" <<'RESPONSES'
 throwaway-old-rekey-passphrase
 RESPONSES
-second_store=$XDG_DATA_HOME/envy/store
 "$ENVY_BIN" set DELTA < other-value
 
 # Preserve a divergent old-key write, as on a laptop that was offline at rekey.
@@ -285,7 +284,28 @@ git --git-dir="$TEST_REMOTE" show HEAD:rotation-pending > remote-pending
 grep -Fx 'Pending rotation: 0' status.out > /dev/null || fail 'cleared pending count'
 assert_clean
 
-# A rejected push keeps a readable committed rekey, without rebasing/retrying.
+# A transient rejection is retried without producing another rekey commit.
+cat > "$TEST_REMOTE/hooks/pre-receive" <<'HOOK'
+#!/bin/sh
+attempts="$(dirname "$0")/../../rekey-push-attempts"
+if [ ! -f "$attempts" ]; then
+    printf 'attempt\n' > "$attempts"
+    exit 1
+fi
+printf 'attempt\n' >> "$attempts"
+HOOK
+chmod +x "$TEST_REMOTE/hooks/pre-receive"
+before=$(git -C "$store" rev-parse HEAD)
+rekey retry-terminal
+assert_equal "$(wc -l < "$TEST_REMOTE/../rekey-push-attempts" | tr -d ' ')" 2 'rekey did not retry transient rejection'
+assert_equal "$(git -C "$store" rev-list --count "$before..HEAD")" 1 'retry produced another rekey commit'
+assert_equal "$(git -C "$store" rev-parse HEAD)" "$(git --git-dir="$TEST_REMOTE" rev-parse HEAD)" 'retried rekey was not pushed'
+"$ENVY_BIN" get FRESH > actual
+cmp expected actual || fail 'retried rekey lost readable local secret'
+assert_clean
+rm "$TEST_REMOTE/../rekey-push-attempts"
+
+# Persistent rejection keeps a readable committed rekey after one retry.
 cat > "$TEST_REMOTE/hooks/pre-receive" <<'HOOK'
 #!/bin/sh
 printf 'attempt\n' >> "$(dirname "$0")/../../rekey-push-attempts"
@@ -295,7 +315,7 @@ chmod +x "$TEST_REMOTE/hooks/pre-receive"
 before=$(git -C "$store" rev-parse HEAD)
 if rekey rejected-terminal; then fail 'rejected rekey push reported success'; fi
 grep 'rekey push failed; new local identity and commit retained' rejected-terminal > /dev/null || fail 'rejected rekey lacks recovery diagnostic'
-assert_equal "$(wc -l < "$TEST_REMOTE/../rekey-push-attempts" | tr -d ' ')" 1 'rekey retried rejected push'
+assert_equal "$(wc -l < "$TEST_REMOTE/../rekey-push-attempts" | tr -d ' ')" 2 'rekey did not make exactly one retry'
 assert_equal "$(git -C "$store" rev-list --count "$before..HEAD")" 1 'rejected push lost rekey commit'
 "$ENVY_BIN" get FRESH > actual
 cmp expected actual || fail 'rejected push lost readable local secret'
@@ -319,11 +339,58 @@ assert_equal "$(git --git-dir="$empty_remote" rev-list --count "$before..HEAD")"
 python3 "$TEST_ROOT/tests/pty-helper.py" -- "$ENVY_BIN" unlock <<'RESPONSES'
 throwaway-new-rekey-passphrase
 RESPONSES
+
+# A concurrent old-key write must stop the retry before rebasing or pushing again.
+"$ENVY_BIN" set FRESH < expected
+race_store=$XDG_DATA_HOME/envy/store
+use_home racing
+python3 "$TEST_ROOT/tests/pty-helper.py" -- "$ENVY_BIN" init "$empty_remote" <<'RESPONSES'
+throwaway-new-rekey-passphrase
+RESPONSES
+racing_store=$XDG_DATA_HOME/envy/store
+export racing_store
+git -C "$racing_store" remote set-url origin "$HOME/absent.git"
+"$ENVY_BIN" set RACING < other-value > /dev/null 2> /dev/null
+git -C "$racing_store" remote set-url origin "$empty_remote"
+racing_revision=$(git -C "$racing_store" rev-parse HEAD)
+use_home empty
+mkdir "$HOME/bin"
+cat > "$HOME/bin/git" <<'GIT'
+#!/bin/sh
+for arg do
+    if [ "$arg" = push ]; then
+        printf 'attempt\n' >> "$HOME/push-attempts"
+        if [ ! -f "$HOME/race-started" ]; then
+            : > "$HOME/race-started"
+            "$real_git" -C "$racing_store" push --quiet origin HEAD || exit 1
+        fi
+        break
+    fi
+done
+exec "$real_git" "$@"
+GIT
+chmod +x "$HOME/bin/git"
+before=$(git -C "$race_store" rev-parse HEAD)
+PATH=$HOME/bin:$original_path
+export PATH
+if rekey racing-terminal; then fail 'rekey merged a concurrent old-key write'; fi
+PATH=$original_path
+export PATH
+assert_equal "$(wc -l < "$HOME/push-attempts" | tr -d ' ')" 1 'rekey pushed after detecting key divergence'
+assert_equal "$(git --git-dir="$empty_remote" rev-parse HEAD)" "$racing_revision" 'rekey overwrote concurrent remote write'
+assert_equal "$(git -C "$race_store" rev-parse HEAD^)" "$before" 'rekey rebased onto concurrent old-key history'
+[ ! -e "$race_store/secrets/RACING.age" ] || fail 'rekey merged unreadable old-key ciphertext'
+"$ENVY_BIN" get FRESH > actual
+cmp expected actual || fail 'concurrent rejection lost local value'
+store=$race_store
+assert_clean
 use_home first
+store=$first_store
 
 # No secret or chosen passphrase is logged by envy or in commit messages.
 git --git-dir="$TEST_REMOTE" log --format=%B > history
-cat rekey-terminal corrupt-terminal commit-terminal mismatch.err hook.err >> history
+cat rekey-terminal corrupt-terminal commit-terminal retry-terminal rejected-terminal \
+    racing-terminal mismatch.err hook.err >> history
 sed '/^$/d' expected other-value > secret-patterns
 printf 'throwaway-new-rekey-passphrase\nthrowaway-old-rekey-passphrase\n' >> secret-patterns
 if grep -F -f secret-patterns history > /dev/null; then fail 'rekey leaked a value or passphrase'; fi
