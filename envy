@@ -922,6 +922,9 @@ envy_environment_exports() {
         envy_quoted=${envy_quoted%.}
         envy_quoted=${envy_quoted%?}
         if [ "${envy_environment_command-}" = hook ]; then
+            # Remove inherited integer/array attributes before assigning text;
+            # otherwise the shell can interpret a secret as arithmetic.
+            printf 'unset %s || return 1\n' "$envy_alias" >> "$envy_temp/exports"
             printf "export %s='%s' || return 1\n" "$envy_alias" "$envy_quoted" >> "$envy_temp/exports"
         else
             printf "export %s='%s'\n" "$envy_alias" "$envy_quoted" >> "$envy_temp/exports"

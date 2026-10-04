@@ -206,6 +206,20 @@ notice 2 'envy: could not export project environment'
 envy project edit --global || fail 'global cleanup failed'
 SESSION
 
+cat > "$HOME/typed-session" <<'SESSION'
+cd "$HOME/outside" || exit 1
+typeset -i Original=7
+eval "$(envy hook)"
+cd "$HOME/first" || exit 1
+_envy_hook 2> "$HOME/typed-notice"
+sh -c 'printf "%s" "$Original"' > "$HOME/typed-observed"
+cmp "$HOME/expected-value" "$HOME/typed-observed" || exit 1
+[ ! -e "$HOME/injected" ] || exit 1
+cd "$HOME/outside" || exit 1
+_envy_hook 2> "$HOME/typed-notice"
+[ "$Original" = 7 ] || exit 1
+SESSION
+
 cp "$store/projects/first/map" "$HOME/first-map"
 cp "$store/secrets/SECOND.age" "$HOME/second-ciphertext"
 cp "$XDG_DATA_HOME/envy/identity" "$HOME/identity-backup"
@@ -222,6 +236,9 @@ for shell in bash zsh; do
         bash) set -- bash --noprofile --norc ;;
         zsh) set -- zsh -f ;;
     esac
+    "$@" "$HOME/typed-session" > "$HOME/typed.out" 2> "$HOME/typed.err" ||
+        fail 'hook did not load exact text over an integer variable and restore its original value'
+    [ ! -s "$HOME/typed.out" ] && [ ! -s "$HOME/typed.err" ] || fail 'typed hook session emitted unexpected output'
     "$@" "$HOME/session" > "$HOME/session.out" 2> "$HOME/session.err" || {
         cat "$HOME/session.err" >&2
         fail 'shell hook session failed'
