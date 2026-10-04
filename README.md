@@ -24,6 +24,14 @@ pushes it immediately. If another machine has pushed first, envy pulls with
 rebase and retries the push once. Offline writes succeed locally with a warning;
 run `sync` when the remote is available to send those commits.
 
+Use `./envy edit NAME` to edit a secret's current value or create a missing
+secret. It opens `$EDITOR`, falling back to `vi`; editor options are supported.
+Multi-line values and trailing newlines are preserved exactly. Changed values
+are encrypted, committed and pushed; leaving an existing value unchanged makes
+no commit. Plaintext and editor backups stay in an owner-only temporary
+directory that is removed on exit, including interrupts and editor failures.
+An editor failure leaves the stored secret unchanged.
+
 Remove or rename a secret with:
 
 ```sh

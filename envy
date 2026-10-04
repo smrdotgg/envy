@@ -10,6 +10,7 @@ envy_help() (
         '  unlock        Recover the local identity with the store passphrase' \
         '  set NAME      Store a value from a hidden prompt or stdin' \
         '  get NAME      Print a stored value exactly' \
+        "  edit NAME     Edit or create a secret with \$EDITOR (default: vi)" \
         '  ls            List secret names without decrypting' \
         '  rm [--force] NAME  Remove a secret; refuse central mapping references' \
         '  mv OLD NEW    Rename a secret and update central mapping references' \
@@ -30,7 +31,6 @@ envy_help() (
         '  help          Show this help' \
         '' \
         'Planned commands (not implemented yet):' \
-        '  Secrets:  edit' \
         '  Using:    status' \
         '  Machine:  rekey, doctor, self-update, uninstall'
 )
@@ -114,6 +114,7 @@ envy_config() {
 
 envy_cleanup() {
     trap '' HUP INT TERM
+    [ -z "$envy_editor_pid" ] || kill "$envy_editor_pid" 2> /dev/null || :
     [ -z "$envy_tty_state" ] || stty "$envy_tty_state" 2> /dev/null || :
     [ -z "$envy_temp" ] || rm -rf "$envy_temp"
     [ -z "$envy_stage" ] || rm -rf "$envy_stage"
@@ -133,6 +134,7 @@ envy_prepare() {
     envy_paths
     umask 077
     envy_tty_state=
+    envy_editor_pid=
     envy_temp=
     envy_stage=
     envy_fetch_temp=
@@ -549,6 +551,52 @@ envy_get() (
     age -d -i "$envy_identity" "$envy_store/secrets/$1.age" 2> /dev/null ||
         envy_error "could not decrypt secret: $1"
 )
+
+envy_edit() {
+    [ "$#" -eq 1 ] || envy_error 'usage: envy edit NAME'
+    envy_name "$1"
+    envy_begin
+    envy_require_store
+    envy_clean_store
+    envy_temp=$(mktemp -d "$envy_data/.edit.XXXXXX") || envy_error 'cannot create temporary directory'
+    envy_edit_existing=no
+    if [ -f "$envy_store/secrets/$1.age" ]; then
+        envy_edit_existing=yes
+        age -d -i "$envy_identity" "$envy_store/secrets/$1.age" > "$envy_temp/original" 2> /dev/null ||
+            envy_error "could not decrypt secret: $1"
+    else
+        : > "$envy_temp/original"
+    fi
+    cp "$envy_temp/original" "$envy_temp/value"
+    # EDITOR is a user-supplied shell command and may include options. Waiting
+    # on an asynchronous child lets signal traps clean up promptly; preserve
+    # stdin so terminal editors still receive input.
+    {
+        sh -c 'exec '"${EDITOR:-vi}"' "$1"' envy-editor "$envy_temp/value" <&3 3<&- &
+        envy_editor_pid=$!
+    } 3<&0
+    if wait "$envy_editor_pid"; then
+        envy_editor_pid=
+    else
+        envy_editor_pid=
+        envy_error 'secret editor failed; secret not saved'
+    fi
+    if [ ! -f "$envy_temp/value" ] || [ -L "$envy_temp/value" ]; then
+        envy_error 'editor did not leave a regular file; secret not saved'
+    fi
+    if [ "$envy_edit_existing" = yes ] && cmp -s "$envy_temp/original" "$envy_temp/value"; then
+        return
+    fi
+    age -a -R "$envy_store/recipient" -o "$envy_temp/secret.age" "$envy_temp/value" 2> /dev/null ||
+        envy_error 'could not encrypt secret'
+    mkdir -p "$envy_store/secrets"
+    mv "$envy_temp/secret.age" "$envy_store/secrets/$1.age"
+    # Remove plaintext and editor backup files before committing or syncing.
+    rm -rf "$envy_temp"
+    envy_temp=
+    git -C "$envy_store" add -- "secrets/$1.age"
+    envy_commit_push "edit $1"
+}
 
 envy_ls() (
     [ "$#" -eq 0 ] || envy_error 'usage: envy ls'
@@ -1413,7 +1461,7 @@ case ${1-help} in
     pull|push|sync)
         envy_sync_command "$@"
         ;;
-    init|unlock|set|get|ls|rm|mv|project|check|link|unlink|allow|config)
+    init|unlock|set|get|edit|ls|rm|mv|project|check|link|unlink|allow|config)
         envy_command=$1
         shift
         "envy_$envy_command" "$@"
