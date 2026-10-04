@@ -54,8 +54,9 @@ snapshot > no-url.after
 cmp no-url.before no-url.after || fail 'no-URL rerun changed files or timestamps'
 
 # Create a new store through a downloaded/piped installer; age still owns its tty.
+ln -s "$TEST_REMOTE" installer-store.git
 python3 "$TEST_ROOT/tests/pty-helper.py" --transcript create-terminal -- \
-    dash -c 'cat "$TEST_ROOT/install.sh" | dash -s -- --yes "$TEST_REMOTE"' <<'RESPONSES'
+    dash -c 'cat "$TEST_ROOT/install.sh" | dash -s -- --yes ./installer-store.git' <<'RESPONSES'
 throwaway-installer-passphrase
 throwaway-installer-passphrase
 RESPONSES
@@ -115,6 +116,11 @@ rm "$HOME/loaded-value"
 
 # A configured rerun is local, non-interactive and preserves the whole home.
 snapshot > configured.before
+dash "$TEST_ROOT/install.sh" ./installer-store.git < /dev/null > relative.out 2> relative.err
+[ ! -s relative.err ] || fail 'relative store URL rerun requested input'
+snapshot > relative.after
+cmp configured.before relative.after || fail 'relative store URL rerun changed files or timestamps'
+# The absolute path to the same repository is also a harmless rerun.
 dash "$TEST_ROOT/install.sh" "$TEST_REMOTE" < /dev/null > configured.out 2> configured.err
 [ ! -s configured.err ] || fail 'configured rerun requested input'
 snapshot > configured.after

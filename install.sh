@@ -147,6 +147,15 @@ if [ -n "$install_url" ]; then
     if [ -e "$install_store" ] || [ -e "$install_identity" ]; then
         install_origin=$(git -C "$install_store" config --get remote.origin.url 2> /dev/null) ||
             install_error 'existing local state is incomplete; recover it with envy init or envy unlock'
+        # Git records an absolute origin for a relative local clone. Compare
+        # existing local directories by physical path, including symlink aliases.
+        if [ "$install_origin" != "$install_url" ] &&
+            [ -d "$install_origin" ] && [ -d "$install_url" ]; then
+            install_origin=$(CDPATH='' cd -- "$install_origin" && pwd -P) ||
+                install_error 'cannot resolve existing local store URL'
+            install_url=$(CDPATH='' cd -- "$install_url" && pwd -P) ||
+                install_error 'cannot resolve local store URL'
+        fi
         [ "$install_origin" = "$install_url" ] || install_error 'machine already uses a different store URL'
         # ls validates the format and identity without decrypting or fetching.
         "$install_dir/envy" ls > /dev/null < /dev/null || exit 1
