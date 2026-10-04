@@ -50,6 +50,10 @@ EDITOR=vi ./envy project edit my-project
 ./envy run --project my-project -- your-command arg
 eval "$(./envy env --project my-project)"
 ./envy project rm my-project
+./envy link my-project  # run inside the project's checkout
+./envy run -- your-command arg
+./envy env
+./envy unlink
 EDITOR=vi ./envy project edit --global
 ./envy project show --global
 ./envy run -- your-command arg
@@ -69,15 +73,36 @@ apply to every `run` and `env`, including when no project is selected. Layers
 are read in order: global, then the selected central project. The last assignment
 to an alias wins, including repeated aliases within a file.
 
+`link [name]` associates the checkout's `origin` with a central project, creating
+an empty mapping if needed. The name defaults to the checkout directory name.
+Remote links are committed and pushed. SSH, SCP-style and HTTPS URLs match after
+removing the scheme, user, port, trailing slash and `.git`, and ignoring case.
+A remote can belong to only one project. Other clones and git worktrees match
+automatically, including from subdirectories; reads use only the cached store.
+Without `--project`, `run` and `env` select this matched project. An unlinked
+directory receives only the global layer.
+
+With no `origin`, or with `link --local [name]`, the association is recorded in
+`${XDG_STATE_HOME:-$HOME/.local/state}/envy/links` and never synced. A newly
+created central project is still committed and pushed. Local links use physical
+absolute paths, take priority over remote matches, and apply to subdirectories
+of non-git directories too. Local link paths cannot contain newlines. `unlink`
+removes the local association first, if present; otherwise it removes the
+current `origin` from the central project's remotes and commits and pushes.
+Removing a remote association affects every matching clone and worktree, and
+preserves the project's mapping. If a local override covered a remote match,
+removing that override reveals the remote project again.
+
 Project edits validate the entire mapping before saving, committing and pushing.
 Invalid edits leave the previous mapping intact. Syntax errors and missing secrets
 report the file, line and key; `run` launches nothing and `env` emits nothing.
 Exports preserve quotes and all newlines, including trailing newlines. `run`
 returns the command's exit status. Project removal leaves its secrets in the store.
 `check` validates the global mapping and every central project mapping, reports
-all errors with their file and line, and exits non-zero on errors. It also lists
-unreferenced secrets as information, without decrypting them. Automatic project
-selection and in-project mapping files are planned for later slices.
+all errors with their file and line, and exits non-zero on errors. It also reports
+remotes listed under more than one project and lists unreferenced secrets as
+information, without decrypting them. In-project mapping files are planned for
+a later slice.
 
 For command help and version information:
 
