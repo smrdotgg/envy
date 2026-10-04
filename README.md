@@ -201,6 +201,23 @@ Successful clones and fetches record their time in
 `${XDG_STATE_HOME:-$HOME/.local/state}/envy/last-fetch`. An unreachable remote
 leaves that timestamp and the cached environment available for the next retry.
 
+Run `envy status` to inspect the current directory using the initialized local
+store. It shows the physical project root and whether it matched by remote,
+local link, an in-project file alone, or no project. Each mapping layer is
+reported as present, absent, unapproved or invalid. For usable layers, each
+alias points to its winning mapping file and line, marked as secret or literal;
+neither kind prints its value. Blocked layers produce no alias table.
+
+Status also shows the effective ambient setting and machine setting, quiet mode,
+local identity match, cached ahead/behind counts and the last successful fetch
+time in epoch seconds, with cache freshness and the configured interval.
+Ahead/behind compare against the cached upstream, so unseen remote changes
+require a later sync to appear. Missing upstream information is shown as unknown.
+Status never fetches, decrypts values or waits for the store lock, even when
+the cache is stale. It works outside projects and reports mapping, approval and
+identity problems without hiding the other state; those problems return a
+non-zero exit status. Invalid mappings include file, line and key diagnostics.
+
 For command help and version information:
 
 ```sh

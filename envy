@@ -20,6 +20,7 @@ envy_help() (
         '  allow         Review and approve the current project .envy on this machine' \
         '  run [--project <name>] -- cmd...  Run with the layered environment' \
         '  env [--project <name>]  Print shell exports for the layered environment' \
+        '  status        Show project, layer sources and cached machine/store state' \
         '  hook          Print the bash/zsh ambient hook for eval' \
         '  config [ambient|quiet on|off]  Show or change machine-local settings' \
         '  config sync_interval <seconds>  Set the background refresh interval' \
@@ -31,7 +32,6 @@ envy_help() (
         '  help          Show this help' \
         '' \
         'Planned commands (not implemented yet):' \
-        '  Using:    status' \
         '  Machine:  rekey, doctor, self-update, uninstall'
 )
 
@@ -1026,6 +1026,7 @@ envy_resolve() (
     done
     : > "$envy_temp/errors"
     if ENVY_MAP_ERRORS=$envy_temp/errors ENVY_MAP_REFERENCES=${envy_resolve_references-} \
+        ENVY_MAP_PROVENANCE=${envy_resolve_provenance-} \
         ENVY_MAP_REQUESTS=${envy_resolve_requests-} ENVY_MAP_TARGET=${envy_resolve_target-} \
         ENVY_MAP_LOCATIONS=${envy_resolve_locations-} ENVY_MAP_RENAME_TO=${envy_resolve_rename_to-} \
         ENVY_MAP_REWRITE=${envy_resolve_rewrite-} LC_ALL=C awk '
@@ -1090,15 +1091,20 @@ envy_resolve() (
             if (!(alias in values)) order[++total] = alias
             values[alias] = value
             kinds[alias] = kind
+            sources[alias] = display[FILENAME] ":" FNR
         }
         END {
             if (failed) exit 1
             if (rewritten)
                 for (i = 1; i <= line_count; i++)
                     print lines[i] > ENVIRON["ENVY_MAP_REWRITE"]
-            for (i = 1; i <= total; i++)
-                # Sentinels preserve empty values and tabs through shell read.
-                print order[i] "\t" kinds[order[i]] "\t." values[order[i]] "."
+            for (i = 1; i <= total; i++) {
+                if (ENVIRON["ENVY_MAP_PROVENANCE"] == "yes")
+                    print "  " order[i] " <- " sources[order[i]] " (" kinds[order[i]] ")"
+                else
+                    # Sentinels preserve empty values and tabs through shell read.
+                    print order[i] "\t" kinds[order[i]] "\t." values[order[i]] "."
+            }
         }
     ' "$envy_temp/names" "$@"; then
         return 0
@@ -1425,6 +1431,156 @@ envy_hook_env() {
     envy_refresh_background || :
 }
 
+# Inspect each layer separately so a broken file cannot hide the other states.
+# The merged provenance is emitted only when every active layer is usable.
+envy_status_layer() {
+    envy_status_layer_state=absent
+    if [ -e "$2" ] || [ -L "$2" ] || [ "$4" = required ]; then
+        if [ ! -f "$2" ]; then
+            printf 'envy: %s: mapping is not a regular file\n' "$3" >&2
+            envy_status_layer_state=invalid
+        elif envy_resolve "$2" "$3" > /dev/null; then
+            envy_status_layer_state=present
+            [ "$4" != unapproved ] || envy_status_layer_state=unapproved
+        else
+            envy_status_layer_state=invalid
+        fi
+    fi
+    printf 'Layer %s: %s (%s)\n' "$1" "$envy_status_layer_state" "$3"
+    case $envy_status_layer_state in
+        invalid|unapproved) envy_status_failed=1; envy_status_blocked=yes ;;
+    esac
+}
+
+envy_status() {
+    [ "$#" -eq 0 ] || envy_error 'usage: envy status'
+    envy_prepare
+    envy_validate_store "$envy_store"
+    envy_dependencies
+    envy_settings_load
+    envy_temp=$(mktemp -d "$envy_data/.status.XXXXXX") || envy_error 'cannot create temporary directory'
+    envy_status_failed=0
+    envy_status_blocked=no
+    envy_selected_project=
+    envy_status_match='no project'
+    envy_directory_root
+    if [ -n "$envy_local_name" ]; then
+        envy_selected_project=$envy_local_name
+        envy_status_match='local link'
+    elif [ -n "$envy_origin" ]; then
+        envy_remote=$(printf '%s\n' "$envy_origin" | envy_normalize_remote)
+        if envy_selected_project=$(envy_remote_project "$envy_remote"); then
+            [ -z "$envy_selected_project" ] || envy_status_match=remote
+        else
+            envy_status_match=invalid
+            envy_status_failed=1
+            envy_status_blocked=yes
+        fi
+    fi
+    if [ -n "$envy_selected_project" ] && ! (envy_project_name "$envy_selected_project"); then
+        envy_selected_project=
+        envy_status_match=invalid
+        envy_status_failed=1
+        envy_status_blocked=yes
+    fi
+    envy_status_inproject=${envy_root%/}/.envy
+    if [ -z "$envy_selected_project" ] && [ "$envy_status_match" = 'no project' ] &&
+        { [ -e "$envy_status_inproject" ] || [ -L "$envy_status_inproject" ]; }; then
+        envy_status_match='in-project file only'
+    fi
+    if [ "$envy_is_checkout" = yes ] || [ "$envy_status_match" != 'no project' ]; then
+        printf 'Project root: %s\n' "$envy_root"
+    else
+        printf '%s\n' 'Project root: none'
+    fi
+    printf 'Project: %s (match: %s)\n' "${envy_selected_project:-none}" "$envy_status_match"
+
+    envy_status_layer global "$envy_store/global" "$envy_store/global" optional
+    if [ -n "$envy_selected_project" ]; then
+        envy_map=$envy_store/projects/$envy_selected_project/map
+        envy_status_layer 'central project' "$envy_map" "$envy_map" required
+    else
+        printf '%s\n' 'Layer central project: absent (no matched project)'
+    fi
+    if envy_snapshot_project; then
+        envy_status_trust=optional
+        if [ -n "$envy_inproject" ] && ! envy_project_approved; then
+            envy_status_trust=unapproved
+            printf 'envy: %s: unapproved or changed mapping; run envy allow\n' "$envy_inproject" >&2
+        fi
+        if [ -n "$envy_inproject" ]; then
+            envy_status_layer in-project "$envy_temp/in-project" "$envy_inproject" "$envy_status_trust"
+        else
+            printf 'Layer in-project: absent (%s)\n' "$envy_status_inproject"
+        fi
+    else
+        printf 'Layer in-project: invalid (%s)\n' "$envy_status_inproject"
+        envy_status_failed=1
+        envy_status_blocked=yes
+    fi
+    if [ "$envy_status_blocked" = yes ]; then
+        printf '%s\n' 'Aliases: none (layers blocked; nothing can be loaded)'
+    else
+        # Use the environment resolver itself for the winning file and line.
+        # This mode emits identifiers and provenance, never literal/secret values.
+        envy_resolve_provenance=yes
+        if (envy_environment_table); then
+            printf '%s\n' 'Aliases (winning layer file:line):'
+            if [ -s "$envy_temp/table" ]; then
+                cat "$envy_temp/table"
+            else
+                printf '%s\n' '  none'
+            fi
+        else
+            printf '%s\n' 'Aliases: none (layers blocked; nothing can be loaded)'
+            envy_status_failed=1
+        fi
+    fi
+    envy_status_ambient=$envy_ambient
+    case ${ENVY_AMBIENT-} in
+        0) envy_status_ambient=off ;;
+        1) envy_status_ambient=on ;;
+        '') ;;
+        *)
+            envy_status_ambient=invalid
+            printf '%s\n' 'envy: ENVY_AMBIENT must be 0 or 1' >&2
+            envy_status_failed=1
+            ;;
+    esac
+    printf 'Ambient: %s (machine: %s)\n' "$envy_status_ambient" "$envy_ambient"
+    printf 'Quiet: %s\n' "$envy_quiet"
+    # Comparing cached refs never fetches and cannot prompt for authentication.
+    if envy_status_counts=$(git -C "$envy_store" rev-list --left-right --count 'HEAD...@{upstream}' 2> /dev/null); then
+        printf '%s\n' "$envy_status_counts" | awk '{ printf "Sync (cached upstream): ahead %s, behind %s\n", $1, $2 }'
+    else
+        printf '%s\n' 'Sync (cached upstream): ahead unknown, behind unknown (no cached upstream)'
+    fi
+    if [ ! -e "$envy_state/last-fetch" ] && [ ! -L "$envy_state/last-fetch" ]; then
+        printf '%s\n' 'Last fetch: never'
+    elif [ -f "$envy_state/last-fetch" ] && envy_status_fetched=$(LC_ALL=C awk '
+        NR == 1 && /^[0-9]+$/ { fetched = $0; valid = 1; next }
+        { valid = 0 }
+        END { if (valid) print fetched; else exit 1 }
+    ' "$envy_state/last-fetch"); then
+        printf 'Last fetch: %s (epoch seconds)\n' "$envy_status_fetched"
+    else
+        printf '%s\n' 'Last fetch: invalid timestamp'
+    fi
+    if envy_refresh_due; then
+        printf 'Fetch cache: stale (sync interval: %s seconds)\n' "$envy_sync_interval"
+    else
+        printf 'Fetch cache: fresh (sync interval: %s seconds)\n' "$envy_sync_interval"
+    fi
+    if envy_check_identity "$envy_store" "$envy_identity" 2> "$envy_temp/identity-error"; then
+        printf '%s\n' 'Identity: matches store'
+    else
+        printf '%s\n' 'Identity: unavailable or does not match store; run envy unlock'
+        cat "$envy_temp/identity-error" >&2
+        envy_status_failed=1
+    fi
+    return "$envy_status_failed"
+}
+
 envy_check() {
     [ "$#" -eq 0 ] || envy_error 'usage: envy check'
     envy_prepare
@@ -1468,7 +1624,7 @@ case ${1-help} in
     pull|push|sync)
         envy_sync_command "$@"
         ;;
-    init|unlock|set|get|edit|ls|rm|mv|project|check|link|unlink|allow|config)
+    init|unlock|set|get|edit|ls|rm|mv|project|check|link|unlink|allow|config|status)
         envy_command=$1
         shift
         "envy_$envy_command" "$@"
