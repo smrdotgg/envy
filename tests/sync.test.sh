@@ -154,6 +154,43 @@ done
 git -C "$first_store" reset --quiet -- unrelated
 rm "$first_store/unrelated"
 
+# A display preference must not hide untracked files from the safety check.
+git -C "$first_store" config status.showUntrackedFiles no
+printf '%s\n' 'untracked fixture metadata' > "$first_store/unrelated"
+for command in pull push sync set; do
+    case $command in
+        set) set -- set DIRTY ;;
+        *) set -- "$command" ;;
+    esac
+    if "$ENVY_BIN" "$@" < first-value > dirty.out 2> dirty.err; then
+        fail 'command accepted untracked files hidden by git configuration'
+    fi
+    grep 'store has uncommitted changes' dirty.err > /dev/null || fail 'hidden untracked file not diagnosed'
+    assert_equal "$(git -C "$first_store" rev-parse HEAD)" "$revision" 'untracked refusal changed history'
+    [ ! -e "$first_store/secrets/DIRTY.age" ] || fail 'untracked refusal wrote a secret'
+    assert_equal "$(cat "$first_store/unrelated")" 'untracked fixture metadata' 'untracked refusal changed the file'
+done
+rm "$first_store/unrelated"
+git -C "$first_store" config --unset status.showUntrackedFiles
+
+# Failed status inspection must stop before overwriting a secret or syncing.
+cp "$first_store/.git/index" saved-index
+printf '%s\n' 'invalid fixture index' > "$first_store/.git/index"
+cp "$first_store/secrets/FIRST.age" saved-first.age
+for command in pull push sync set; do
+    case $command in
+        set) set -- set FIRST ;;
+        *) set -- "$command" ;;
+    esac
+    if "$ENVY_BIN" "$@" < second-value > dirty.out 2> dirty.err; then
+        fail 'command accepted a store whose status could not be inspected'
+    fi
+    grep 'could not inspect store cleanliness' dirty.err > /dev/null || fail 'failed inspection not diagnosed'
+    cmp saved-first.age "$first_store/secrets/FIRST.age" || fail 'failed inspection replaced ciphertext'
+    assert_equal "$(git -C "$first_store" rev-parse HEAD)" "$revision" 'failed inspection changed history'
+done
+mv saved-index "$first_store/.git/index"
+
 # Updating the same secret must preserve the just-written local commit on conflict.
 "$ENVY_BIN" set SHARED < first-value
 use_home second

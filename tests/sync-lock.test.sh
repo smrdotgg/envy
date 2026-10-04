@@ -7,10 +7,12 @@ throwaway-lock-passphrase
 throwaway-lock-passphrase
 RESPONSES
 
-# Use real CLI children, holding a piped set open to force lock contention.
+# Hold set at its terminal prompt to coordinate through observable CLI output.
 python3 - <<'PY'
 import os
 import pathlib
+import pty
+import select
 import signal
 import subprocess
 import time
@@ -20,6 +22,7 @@ store = pathlib.Path(os.environ["XDG_DATA_HOME"]) / "envy/store"
 lock = pathlib.Path(os.environ["XDG_STATE_HOME"]) / "envy/lock"
 remote = os.environ["TEST_REMOTE"]
 children = []
+terminals = []
 
 
 def run(*args):
@@ -39,12 +42,23 @@ def start(*args, value=None):
     return process
 
 
-def wait_for_owner(process):
+def start_held(name):
+    terminal, slave = pty.openpty()
+    terminals.append(terminal)
+    process = subprocess.Popen(
+        [tool, "set", name], stdin=slave, stdout=slave, stderr=slave,
+        start_new_session=True,
+    )
+    os.close(slave)
+    children.append(process)
+    output = b""
     deadline = time.monotonic() + 10
-    while not (lock / str(process.pid)).is_dir():
-        assert process.poll() is None, "set exited before acquiring its lock"
-        assert time.monotonic() < deadline, "set did not acquire its lock"
-        time.sleep(0.01)
+    while b"Secret value: " not in output:
+        assert process.poll() is None, "set exited before prompting"
+        assert time.monotonic() < deadline, "set did not prompt"
+        if select.select([terminal], [], [], 0.1)[0]:
+            output += os.read(terminal, 4096)
+    return process, terminal
 
 
 def finish(process):
@@ -56,17 +70,14 @@ def finish(process):
 
 try:
     finish(start("set", "CACHED", value=b"cached throwaway value"))
-    holder = start("set", "HELD")
-    wait_for_owner(holder)
+    holder, terminal = start_held("HELD")
     writer = start("set", "WAITING", value=b"waiting throwaway value")
     sync = start("sync")
     time.sleep(0.3)
     assert writer.poll() is None and sync.poll() is None, "live lock was ignored"
     assert subprocess.check_output([tool, "get", "CACHED"], timeout=2) == b"cached throwaway value"
     assert subprocess.check_output([tool, "ls"], timeout=2) == b"CACHED\n"
-    holder.stdin.write(b"held throwaway value")
-    holder.stdin.close()
-    holder.stdin = None
+    os.write(terminal, b"held throwaway value\n")
     finish(holder)
     finish(writer)
     assert b"up to date" in finish(sync)
@@ -76,8 +87,7 @@ try:
 
     # SIGKILL bypasses cleanup. Several contenders must safely reclaim the dead
     # owner's lock, each committing only its own secret.
-    dead = start("set", "NEVER_COMMITTED")
-    wait_for_owner(dead)
+    dead, terminal = start_held("NEVER_COMMITTED")
     os.killpg(dead.pid, signal.SIGKILL)
     dead.communicate(timeout=10)
     assert lock.is_dir(), "killed process did not leave a stale lock to test"
@@ -104,13 +114,19 @@ try:
         paths = run("git", "-C", str(store), "diff-tree", "--no-commit-id", "--name-only", "-r", commit.decode())
         assert paths == b"secrets/" + subject[4:] + b".age\n", "a writer committed another writer's file"
 
-    # Death between mkdir and publishing the owner must not leave an eternal lock.
-    lock.mkdir()
+    # A handled interrupt must release the lock and leave the store usable.
+    interrupted, terminal = start_held("INTERRUPTED")
+    os.killpg(interrupted.pid, signal.SIGTERM)
+    interrupted.communicate(timeout=10)
+    assert interrupted.returncode != 0, "interrupted set reported success"
+    assert not lock.exists(), "interrupted command left a lock"
     run(tool, "sync")
-    assert not lock.exists(), "empty abandoned lock was not cleared"
+    assert not (store / "secrets/INTERRUPTED.age").exists()
 finally:
     for process in children:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.communicate(timeout=10)
+    for terminal in terminals:
+        os.close(terminal)
 PY

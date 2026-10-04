@@ -175,7 +175,10 @@ envy_git_identity() {
 }
 
 envy_clean_store() {
-    if [ -n "$(git -C "$envy_store" status --porcelain)" ] ||
+    # Check untracked files even when the user's status display hides them.
+    envy_store_status=$(git -C "$envy_store" status --porcelain --untracked-files=all 2> /dev/null) ||
+        envy_error 'could not inspect store cleanliness; resolve the repository error before writing or syncing'
+    if [ -n "$envy_store_status" ] ||
         [ -d "$envy_store/.git/rebase-merge" ] ||
         [ -d "$envy_store/.git/rebase-apply" ] ||
         [ -f "$envy_store/.git/MERGE_HEAD" ]; then
