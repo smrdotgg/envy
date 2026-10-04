@@ -77,10 +77,16 @@ to an alias wins, including repeated aliases within a file.
 an empty mapping if needed. The name defaults to the checkout directory name.
 Remote links are committed and pushed. SSH, SCP-style and HTTPS URLs match after
 removing the scheme, user, port, trailing slash and `.git`, and ignoring case.
+Matching uses the configured `origin` URL, independent of Git's `insteadOf`
+transport rewrites on a machine.
 A remote can belong to only one project. Other clones and git worktrees match
 automatically, including from subdirectories; reads use only the cached store.
 Without `--project`, `run` and `env` select this matched project. An unlinked
 directory receives only the global layer.
+
+If a push retry brings in a competing link from another machine, envy refuses
+to push duplicate remote ownership and keeps the local commits for recovery.
+Remove the conflicting project with `project rm <name>` before syncing again.
 
 With no `origin`, or with `link --local [name]`, the association is recorded in
 `${XDG_STATE_HOME:-$HOME/.local/state}/envy/links` and never synced. A newly

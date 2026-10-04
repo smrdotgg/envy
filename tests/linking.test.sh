@@ -48,6 +48,8 @@ git -C "$app" remote add origin "$code_remote"
 git -C "$app" push --quiet origin main
 git clone --quiet "$code_remote" "$HOME/second-clone"
 git -C "$app" remote set-url origin 'git@GitHub.COM:Owner/Repo.GIT/'
+# Transport rewrites are machine-local and must not change the stored match.
+git -C "$app" config url.ssh://git@machine-only.example/.insteadOf 'git@GitHub.COM:'
 mkdir -p "$app/deep/subdirectory"
 cd "$app/deep/subdirectory"
 observe "$HOME/expected-global"
@@ -63,6 +65,8 @@ assert_equal "$(git -C "$store" status --porcelain)" '' 'link left a dirty store
 
 printf 'slice8_project=TOKEN\nslice8_shared=__literal__("project")\n' > "$HOME/map-input"
 "$ENVY_BIN" project edit app
+observe "$HOME/expected-app"
+git -C "$app" config --unset url.ssh://git@machine-only.example/.insteadOf
 observe "$HOME/expected-app"
 revision=$(git -C "$store" rev-parse HEAD)
 
@@ -182,6 +186,31 @@ observe "$HOME/expected-global"
 cd "$odd_path/subdirectory"
 "$ENVY_BIN" unlink
 observe "$HOME/expected-global"
+
+# A broken local state file must fail before creating a project or loading vars.
+revision=$(git -C "$store" rev-parse HEAD)
+mv "$XDG_STATE_HOME/envy/links" "$HOME/saved-links"
+mkdir "$XDG_STATE_HOME/envy/links"
+if "$ENVY_BIN" link --local failed-local > "$HOME/failed.out" 2> "$HOME/failed.err"; then
+    fail 'local link accepted a directory as its state file'
+fi
+grep 'local links path is not a regular file' "$HOME/failed.err" > /dev/null || fail 'invalid local state was not diagnosed'
+[ ! -e "$store/projects/failed-local" ] || fail 'failed local link created a project'
+assert_equal "$(git -C "$store" status --porcelain)" '' 'failed local link dirtied the store'
+assert_equal "$(git -C "$store" rev-parse HEAD)" "$revision" 'failed local link changed history'
+for command in env run; do
+    case $command in
+        env) set -- env ;;
+        run) set -- run -- dash -c 'touch "$HOME/child-ran"' ;;
+    esac
+    if "$ENVY_BIN" "$@" > "$HOME/failed.out" 2> "$HOME/failed.err"; then
+        fail 'invalid local state loaded an environment'
+    fi
+    [ ! -s "$HOME/failed.out" ] && [ ! -e "$HOME/child-ran" ] || fail 'invalid local state loaded variables or ran a child'
+done
+[ ! -e "$XDG_STATE_HOME/envy/lock" ] || fail 'failed local link left a lock'
+rmdir "$XDG_STATE_HOME/envy/links"
+mv "$HOME/saved-links" "$XDG_STATE_HOME/envy/links"
 
 # Remote unlink propagates to every clone and worktree, preserving the map.
 cd "$app/deep/subdirectory"

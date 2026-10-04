@@ -243,6 +243,12 @@ envy_fetch_rebase() {
 }
 
 envy_push_once() {
+    # A rebase can merge two independently created project directories without
+    # a text conflict while assigning their shared remote to both projects.
+    if ! envy_remote_project > /dev/null; then
+        envy_sync_failure=remotes
+        return 1
+    fi
     if envy_push_output=$(git -C "$envy_store" push --porcelain origin HEAD 2> /dev/null); then
         if printf '%s\n' "$envy_push_output" |
             awk -F '\t' '$1 == "=" { found = 1 } END { exit !found }'; then
@@ -259,12 +265,14 @@ envy_push_once() {
 envy_push_retry() {
     envy_pull_changed=no
     envy_push_once && return 0
+    [ "$envy_sync_failure" != remotes ] || return 1
     envy_fetch_rebase || return 1
     envy_push_once
 }
 
 envy_sync_error() {
     case $envy_sync_failure in
+        remotes) envy_error 'duplicate project remotes; local commits retained; resolve the duplicate links before retrying envy sync' ;;
         conflict) envy_error 'sync conflict; rebase aborted and local commits retained; reconcile the conflicting changes before retrying' ;;
         offline) envy_error 'remote unavailable; local commits retained; run envy sync when online' ;;
         branch) envy_error 'cannot sync a detached HEAD; check out the store branch first' ;;
@@ -455,8 +463,12 @@ envy_remote_project() (
         set -- "$@" "$envy_remote_file"
     done
     [ "$#" -gt 0 ] || return 0
-    : > "$envy_temp/remote-errors"
-    if ENVY_REMOTE_KEY=$envy_remote_key ENVY_REMOTE_ERRORS=$envy_temp/remote-errors LC_ALL=C awk '
+    # Push validation also runs without a caller-owned temporary directory.
+    envy_remote_temp=$(mktemp -d "$envy_data/.remotes.XXXXXX") || envy_error 'cannot create temporary directory'
+    trap 'rm -rf "$envy_remote_temp"' 0
+    trap 'exit 1' HUP INT TERM
+    : > "$envy_remote_temp/errors"
+    if ENVY_REMOTE_KEY=$envy_remote_key ENVY_REMOTE_ERRORS=$envy_remote_temp/errors LC_ALL=C awk '
         $0 != "" {
             project = FILENAME
             sub(/\/remotes$/, "", project)
@@ -478,12 +490,13 @@ envy_remote_project() (
     ' "$@"; then
         return 0
     fi
-    cat "$envy_temp/remote-errors" >&2
+    cat "$envy_remote_temp/errors" >&2
     return 1
 )
 
 envy_local_project() (
-    [ -f "$envy_state/links" ] || return 0
+    [ -e "$envy_state/links" ] || return 0
+    [ -f "$envy_state/links" ] || envy_error 'local links path is not a regular file'
     # The last tab separates the project, so spaces and tabs in paths survive.
     ENVY_LINK_ROOT=$1 LC_ALL=C awk '
         {
@@ -522,7 +535,8 @@ envy_directory_root() {
     envy_local_name=$(envy_local_project "$envy_root") || envy_error 'cannot read local links'
     envy_origin=
     if [ "$envy_is_checkout" = yes ]; then
-        envy_origin=$(git -C "$envy_root" remote get-url origin 2> /dev/null || :)
+        # Match the stored URL, independent of machine-specific insteadOf rules.
+        envy_origin=$(git -C "$envy_root" config --get remote.origin.url 2> /dev/null || :)
     fi
 }
 
@@ -539,7 +553,7 @@ envy_directory_project() {
     fi
 }
 
-envy_write_local_link() {
+envy_stage_local_link() {
     # Local links are line records; refuse a newline rather than corrupt them.
     case $envy_root in
         *'
@@ -556,7 +570,6 @@ envy_write_local_link() {
     if [ -n "$1" ]; then
         printf '%s\t%s\n' "$envy_root" "$1" >> "$envy_stage/links"
     fi
-    mv "$envy_stage/links" "$envy_state/links"
 }
 
 envy_link() {
@@ -600,20 +613,25 @@ envy_link() {
     fi
     envy_link_changed=no
     envy_link_path=projects/$envy_link_name
+    if [ "$envy_link_local" = yes ]; then
+        # Finish fallible reads and staging before changing the store.
+        envy_stage_local_link "$envy_link_name"
+    fi
     if [ ! -f "$envy_store/$envy_link_path/map" ]; then
         mkdir -p "$envy_store/$envy_link_path"
         : > "$envy_store/$envy_link_path/map"
         envy_link_changed=yes
     fi
-    if [ "$envy_link_local" = yes ]; then
-        envy_write_local_link "$envy_link_name"
-    elif [ -z "$envy_remote_owner" ]; then
+    if [ "$envy_link_local" = no ] && [ -z "$envy_remote_owner" ]; then
         printf '%s\n' "$envy_remote" >> "$envy_store/$envy_link_path/remotes"
         envy_link_changed=yes
     fi
     if [ "$envy_link_changed" = yes ]; then
         git -C "$envy_store" add -- "$envy_link_path"
         envy_commit_push "link $envy_link_name"
+    fi
+    if [ "$envy_link_local" = yes ]; then
+        mv "$envy_stage/links" "$envy_state/links"
     fi
 }
 
@@ -625,7 +643,8 @@ envy_unlink() {
     envy_temp=$(mktemp -d "$envy_data/.link.XXXXXX") || envy_error 'cannot create temporary directory'
     envy_directory_root
     if [ -n "$envy_local_name" ]; then
-        envy_write_local_link ''
+        envy_stage_local_link ''
+        mv "$envy_stage/links" "$envy_state/links"
         return
     fi
     [ -n "$envy_origin" ] || envy_error 'checkout is not linked'
