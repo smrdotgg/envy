@@ -24,6 +24,27 @@ pushes it immediately. If another machine has pushed first, envy pulls with
 rebase and retries the push once. Offline writes succeed locally with a warning;
 run `sync` when the remote is available to send those commits.
 
+Remove or rename a secret with:
+
+```sh
+./envy rm UNUSED_TOKEN
+./envy rm --force REFERENCED_TOKEN
+./envy mv OLD_TOKEN NEW_TOKEN
+```
+
+`rm` refuses references in the global mapping or any central project mapping,
+listing each file, line and alias, including overridden assignments. `--force`
+removes the secret anyway and leaves those mappings for you to repair. In-project
+`.envy` files are outside this reference check.
+
+`mv` keeps the encrypted value and rewrites every central reference in the same
+commit, preserving exported aliases: a bare `OLD_TOKEN` becomes
+`OLD_TOKEN=NEW_TOKEN`. Comments, literals and references to other secrets stay
+unchanged. The destination must be a valid, unused secret name. Rename warns
+that in-project `.envy` files are not updated; update them and approve them again
+on each machine. Rename and ordinary removal validate central mappings before
+changing the store; repair invalid mappings first or use force removal.
+
 ```sh
 ./envy pull   # fetch and rebase local commits onto the remote
 ./envy push   # push local commits, with one pull/rebase retry

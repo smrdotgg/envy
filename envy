@@ -11,6 +11,8 @@ envy_help() (
         '  set NAME      Store a value from a hidden prompt or stdin' \
         '  get NAME      Print a stored value exactly' \
         '  ls            List secret names without decrypting' \
+        '  rm [--force] NAME  Remove a secret; refuse central mapping references' \
+        '  mv OLD NEW    Rename a secret and update central mapping references' \
         '  project ls|show|edit|rm  Manage central mappings (show/edit --global)' \
         '  link [--local] [name]  Link this checkout or directory to a project' \
         '  unlink        Remove the current local link, or its origin link' \
@@ -28,7 +30,7 @@ envy_help() (
         '  help          Show this help' \
         '' \
         'Planned commands (not implemented yet):' \
-        '  Secrets:  edit, rm, mv' \
+        '  Secrets:  edit' \
         '  Using:    status' \
         '  Machine:  rekey, doctor, self-update, uninstall'
 )
@@ -558,6 +560,94 @@ envy_ls() (
     done
 )
 
+# Inspect every central assignment, including ones overridden by later layers.
+# The resolver can stage rewritten maps; nothing is published until all validate.
+envy_secret_mappings() {
+    envy_maps_failed=0
+    envy_map_number=0
+    for envy_map in "$envy_store/global" "$envy_store"/projects/*/map; do
+        [ -e "$envy_map" ] || continue
+        envy_map_number=$((envy_map_number + 1))
+        if [ ! -f "$envy_map" ]; then
+            printf 'envy: %s: mapping is not a regular file\n' "$envy_map" >&2
+            envy_maps_failed=1
+            continue
+        fi
+        if [ -n "${envy_resolve_rename_to-}" ]; then
+            envy_resolve_rewrite=$envy_temp/maps/$envy_map_number
+        fi
+        if ! envy_resolve "$envy_map" "$envy_map" > /dev/null; then
+            envy_maps_failed=1
+        fi
+    done
+    return "$envy_maps_failed"
+}
+
+envy_rm() {
+    envy_force=no
+    case $# in
+        1) ;;
+        2)
+            case $1:$2 in
+                --force:*) envy_force=yes; shift ;;
+                *:--force) envy_force=yes; set -- "$1" ;;
+                *) envy_error 'usage: envy rm [--force] NAME' ;;
+            esac
+            ;;
+        *) envy_error 'usage: envy rm [--force] NAME' ;;
+    esac
+    envy_name "$1"
+    envy_begin
+    envy_require_store
+    envy_clean_store
+    [ -f "$envy_store/secrets/$1.age" ] || envy_error "secret not found: $1"
+    if [ "$envy_force" = no ]; then
+        envy_temp=$(mktemp -d "$envy_data/.rm.XXXXXX") || envy_error 'cannot create temporary directory'
+        envy_resolve_target=$1
+        envy_resolve_locations=$envy_temp/locations
+        : > "$envy_resolve_locations"
+        envy_secret_mappings || envy_maps_failed=1
+        if [ -s "$envy_resolve_locations" ]; then
+            printf 'envy: secret %s is referenced by central mappings:\n' "$1" >&2
+            cat "$envy_resolve_locations" >&2
+            envy_error 'use envy rm --force NAME to remove it anyway'
+        fi
+        [ "$envy_maps_failed" -eq 0 ] || exit 1
+    fi
+    git -C "$envy_store" rm --quiet -- "secrets/$1.age"
+    envy_commit_push "rm $1"
+}
+
+envy_mv() {
+    [ "$#" -eq 2 ] || envy_error 'usage: envy mv OLD NEW'
+    envy_name "$1"
+    envy_name "$2"
+    envy_begin
+    envy_require_store
+    envy_clean_store
+    [ -f "$envy_store/secrets/$1.age" ] || envy_error "secret not found: $1"
+    if [ -e "$envy_store/secrets/$2.age" ] || [ -L "$envy_store/secrets/$2.age" ]; then
+        envy_error "secret already exists: $2"
+    fi
+    envy_temp=$(mktemp -d "$envy_data/.mv.XXXXXX") || envy_error 'cannot create temporary directory'
+    mkdir "$envy_temp/maps"
+    envy_resolve_target=$1
+    envy_resolve_rename_to=$2
+    envy_secret_mappings || exit 1
+    envy_map_number=0
+    for envy_map in "$envy_store/global" "$envy_store"/projects/*/map; do
+        [ -e "$envy_map" ] || continue
+        envy_map_number=$((envy_map_number + 1))
+        if [ -f "$envy_temp/maps/$envy_map_number" ]; then
+            mv "$envy_temp/maps/$envy_map_number" "$envy_map"
+            git -C "$envy_store" add -- "${envy_map#"$envy_store/"}"
+        fi
+    done
+    git -C "$envy_store" mv -- "secrets/$1.age" "secrets/$2.age"
+    printf '%s\n' 'envy: warning: in-project .envy files are not updated; update their references manually' >&2
+    envy_commit_push "mv $1 $2"
+}
+
 envy_project_name() {
     case $1 in
         ''|[!a-z0-9]*|*[!a-z0-9._-]*)
@@ -881,7 +971,9 @@ envy_resolve() (
     done
     : > "$envy_temp/errors"
     if ENVY_MAP_ERRORS=$envy_temp/errors ENVY_MAP_REFERENCES=${envy_resolve_references-} \
-        ENVY_MAP_REQUESTS=${envy_resolve_requests-} LC_ALL=C awk '
+        ENVY_MAP_REQUESTS=${envy_resolve_requests-} ENVY_MAP_TARGET=${envy_resolve_target-} \
+        ENVY_MAP_LOCATIONS=${envy_resolve_locations-} ENVY_MAP_RENAME_TO=${envy_resolve_rename_to-} \
+        ENVY_MAP_REWRITE=${envy_resolve_rewrite-} LC_ALL=C awk '
         BEGIN {
             for (i = 2; i < ARGC; i += 2) {
                 display[ARGV[i]] = ARGV[i + 1]
@@ -899,6 +991,7 @@ envy_resolve() (
             failed = 1
         }
         FILENAME == ARGV[1] { secrets[$0] = 1; next }
+        ENVIRON["ENVY_MAP_REWRITE"] != "" { lines[++line_count] = $0 }
         $0 == "" || /^#/ { next }
         {
             if ($0 ~ /^[[:space:]]/ || $0 ~ /[[:space:]]$/) {
@@ -926,6 +1019,15 @@ envy_resolve() (
                 if (!(value in secrets)) {
                     error("secret not found: " value); next
                 }
+                if (value == ENVIRON["ENVY_MAP_TARGET"]) {
+                    if (ENVIRON["ENVY_MAP_LOCATIONS"] != "")
+                        print display[FILENAME] ":" FNR ": " alias >> ENVIRON["ENVY_MAP_LOCATIONS"]
+                    if (ENVIRON["ENVY_MAP_REWRITE"] != "") {
+                        # Bare names keep their original exported alias too.
+                        lines[line_count] = alias "=" ENVIRON["ENVY_MAP_RENAME_TO"]
+                        rewritten = 1
+                    }
+                }
             }
             # Include overwritten requests in the review, but never values.
             if (ENVIRON["ENVY_MAP_REQUESTS"] != "")
@@ -936,6 +1038,9 @@ envy_resolve() (
         }
         END {
             if (failed) exit 1
+            if (rewritten)
+                for (i = 1; i <= line_count; i++)
+                    print lines[i] > ENVIRON["ENVY_MAP_REWRITE"]
             for (i = 1; i <= total; i++)
                 # Sentinels preserve empty values and tabs through shell read.
                 print order[i] "\t" kinds[order[i]] "\t." values[order[i]] "."
@@ -1308,7 +1413,7 @@ case ${1-help} in
     pull|push|sync)
         envy_sync_command "$@"
         ;;
-    init|unlock|set|get|ls|project|check|link|unlink|allow|config)
+    init|unlock|set|get|ls|rm|mv|project|check|link|unlink|allow|config)
         envy_command=$1
         shift
         "envy_$envy_command" "$@"
