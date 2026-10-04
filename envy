@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+envy_help() (
+    printf '%s\n' \
+        'Usage: envy <command>' \
+        '' \
+        'Commands:' \
+        '  version       Print the envy version' \
+        '  help          Show this help' \
+        '' \
+        'Planned commands (not implemented yet):' \
+        '  Secrets:  set, get, edit, ls, rm, mv' \
+        '  Projects: project ls|show|edit|rm, link, unlink, allow' \
+        '  Using:    run, env, status, check' \
+        '  Sync:     pull, push, sync' \
+        '  Machine:  init, unlock, hook, config, rekey, doctor, self-update, uninstall'
+)
+
+case ${1-help} in
+    version|help)
+        if [ "$#" -gt 1 ]; then
+            printf '%s\n' 'envy: unexpected arguments; run envy help' >&2
+            exit 1
+        fi
+        case ${1-help} in
+            version) printf '%s\n' 'envy 0.1.0-dev' ;;
+            help) envy_help ;;
+        esac
+        ;;
+    *)
+        printf '%s\n' 'envy: unknown command; run envy help' >&2
+        exit 1
+        ;;
+esac

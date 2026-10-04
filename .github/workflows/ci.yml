@@ -1,0 +1,27 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update
+            sudo apt-get install -y age dash shellcheck python3
+          else
+            brew install age dash shellcheck python3
+          fi
+      - name: Run gate
+        run: |
+          set -- envy
+          [ ! -f install.sh ] || set -- "$@" install.sh
+          shellcheck -s sh "$@"
+          dash tests/run.sh
