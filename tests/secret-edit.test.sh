@@ -241,6 +241,34 @@ for sig, group in ((signal.SIGINT, False), (signal.SIGTERM, False), (signal.SIGH
 PY
 assert_clean_edit
 
+# A saved edit clears only its pending rotation mark in the same pushed commit.
+# Unchanged content and failed editors leave the pending list untouched.
+printf '%s\n' FALLBACK KEY > "$store/rotation-pending"
+git -C "$store" add rotation-pending
+git -C "$store" commit --quiet -m 'fixture pending rotation'
+revision=$(git -C "$store" rev-parse HEAD)
+cp "$store/rotation-pending" expected-pending
+EDITOR_MODE=unchanged "$ENVY_BIN" edit FALLBACK
+assert_equal "$(git -C "$store" rev-parse HEAD)" "$revision" 'unchanged pending edit created a commit'
+cmp expected-pending "$store/rotation-pending" || fail 'unchanged edit cleared a pending mark'
+if EDITOR_MODE=fail "$ENVY_BIN" edit FALLBACK > failure.out 2> failure.err; then
+    fail 'failed pending edit succeeded'
+fi
+cmp expected-pending "$store/rotation-pending" || fail 'failed edit cleared a pending mark'
+assert_clean_edit
+printf 'throwaway rotated edited value\n' > "$HOME/edit-input"
+"$ENVY_BIN" edit FALLBACK
+printf '%s\n' KEY > expected-pending
+cmp expected-pending "$store/rotation-pending" || fail 'saved edit did not clear only its pending mark'
+assert_equal "$(git -C "$store" rev-list --count "$revision..HEAD")" 1 'pending edit did not create one commit'
+printf '%s\n' rotation-pending secrets/FALLBACK.age > expected-changes
+git -C "$store" diff-tree --no-commit-id --name-only -r HEAD > changes
+cmp expected-changes changes || fail 'rotation mark was not committed with ciphertext'
+git --git-dir="$TEST_REMOTE" show HEAD:rotation-pending > remote-pending
+cmp expected-pending remote-pending || fail 'pending rotation change was not pushed'
+cp "$HOME/edit-input" "$HOME/expected-current"
+assert_clean_edit
+
 # Offline saves use the ordinary local commit and subsequent sync flow.
 printf 'throwaway offline edited value\n' > "$HOME/edit-input"
 git -C "$store" remote set-url origin "$HOME/absent.git"

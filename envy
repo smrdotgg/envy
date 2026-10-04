@@ -591,6 +591,13 @@ envy_edit() {
         envy_error 'could not encrypt secret'
     mkdir -p "$envy_store/secrets"
     mv "$envy_temp/secret.age" "$envy_store/secrets/$1.age"
+    if [ -f "$envy_store/rotation-pending" ]; then
+        awk -v name="$1" '$0 != name' "$envy_store/rotation-pending" > "$envy_temp/rotation-pending"
+        if ! cmp -s "$envy_store/rotation-pending" "$envy_temp/rotation-pending"; then
+            mv "$envy_temp/rotation-pending" "$envy_store/rotation-pending"
+            git -C "$envy_store" add -- rotation-pending
+        fi
+    fi
     # Remove plaintext and editor backup files before committing or syncing.
     rm -rf "$envy_temp"
     envy_temp=

@@ -30,7 +30,8 @@ Multi-line values and trailing newlines are preserved exactly. Changed values
 are encrypted, committed and pushed; leaving an existing value unchanged makes
 no commit. Plaintext and editor backups stay in an owner-only temporary
 directory that is removed on exit, including interrupts and editor failures.
-An editor failure leaves the stored secret unchanged.
+An editor failure leaves the stored secret unchanged. Saving a changed value
+also clears that secret's pending rotation mark.
 
 Remove or rename a secret with:
 
