@@ -6,7 +6,8 @@ envy_help() (
         'Usage: envy <command>' \
         '' \
         'Commands:' \
-        '  init <url>    Create a store in an empty git repository' \
+        '  init <url>    Create or join an encrypted store' \
+        '  unlock        Recover the local identity with the store passphrase' \
         '  set NAME      Store a value from a hidden prompt or stdin' \
         '  get NAME      Print a stored value exactly' \
         '  ls            List secret names without decrypting' \
@@ -18,7 +19,7 @@ envy_help() (
         '  Projects: project ls|show|edit|rm, link, unlink, allow' \
         '  Using:    run, env, status, check' \
         '  Sync:     pull, push, sync' \
-        '  Machine:  unlock, hook, config, rekey, doctor, self-update, uninstall'
+        '  Machine:  hook, config, rekey, doctor, self-update, uninstall'
 )
 
 envy_error() {
@@ -45,20 +46,61 @@ envy_name() {
     esac
 }
 
-envy_require_store() {
-    envy_paths
-    if [ ! -d "$envy_store/.git" ] || [ ! -f "$envy_store/format" ]; then
+envy_validate_store() (
+    if [ ! -d "$1/.git" ] || [ ! -f "$1/format" ]; then
         envy_error 'store not initialized; run envy init <url>'
     fi
-    [ "$(cat "$envy_store/format")" = 1 ] || envy_error 'unsupported store format'
-    envy_dependencies
-    [ -f "$envy_identity" ] || envy_error 'local identity missing; run envy unlock'
-    envy_public=$(age-keygen -y "$envy_identity" 2> /dev/null) ||
+    envy_format=$(cat "$1/format")
+    case $envy_format in
+        1) ;;
+        ''|*[!0-9]*) envy_error 'unsupported store format' ;;
+        *)
+            # awk handles large version numbers without shell integer overflow.
+            if printf '%s\n' "$envy_format" | awk '{ exit !($0 + 0 > 1) }'; then
+                envy_error 'unsupported store format; update envy to read this newer store'
+            fi
+            envy_error 'unsupported store format'
+            ;;
+    esac
+)
+
+envy_check_identity() (
+    [ -f "$2" ] || envy_error 'local identity missing; run envy unlock'
+    envy_public=$(age-keygen -y "$2" 2> /dev/null) ||
         envy_error 'cannot read local identity; run envy unlock'
-    if [ ! -f "$envy_store/recipient" ] ||
-        [ "$envy_public" != "$(cat "$envy_store/recipient")" ]; then
+    if [ ! -f "$1/recipient" ] ||
+        [ "$envy_public" != "$(cat "$1/recipient")" ]; then
         envy_error 'store public key does not match local identity; run envy unlock'
     fi
+)
+
+envy_require_store() {
+    envy_paths
+    envy_validate_store "$envy_store"
+    envy_dependencies
+    envy_check_identity "$envy_store" "$envy_identity"
+}
+
+envy_recover_identity() {
+    [ -f "$1/identity.age" ] || envy_error 'store encrypted identity missing'
+    # age reads the passphrase from the terminal, never stdin or an argument.
+    age -d -o "$2" "$1/identity.age" 2> /dev/null ||
+        envy_error 'could not unlock identity; check the store passphrase'
+    chmod 600 "$2"
+    envy_check_identity "$1" "$2"
+}
+
+envy_unlock() {
+    [ "$#" -eq 0 ] || envy_error 'usage: envy unlock'
+    envy_dependencies
+    envy_paths
+    envy_validate_store "$envy_store"
+    umask 077
+    envy_stage=$(mktemp -d "$envy_data/.unlock.XXXXXX") || envy_error 'cannot create temporary directory'
+    trap 'trap "" HUP INT TERM; rm -rf "$envy_stage"' 0
+    trap 'exit 1' HUP INT TERM
+    envy_recover_identity "$envy_store" "$envy_stage/identity"
+    mv "$envy_stage/identity" "$envy_identity"
 }
 
 envy_git_identity() {
@@ -95,7 +137,11 @@ envy_init() {
     envy_existing_refs=$(git -C "$envy_stage/store" for-each-ref --format='%(refname)' 2> /dev/null) ||
         envy_error 'could not inspect store repository'
     if [ -n "$envy_existing_refs" ]; then
-        envy_error 'repository is not empty; joining an existing store is not implemented yet'
+        envy_validate_store "$envy_stage/store"
+        envy_recover_identity "$envy_stage/store" "$envy_stage/identity"
+        mv "$envy_stage/store" "$envy_store"
+        mv "$envy_stage/identity" "$envy_identity"
+        return
     fi
     # age owns the terminal passphrase prompt, including its blank-input generator.
     age-keygen -o "$envy_stage/identity" > /dev/null 2>&1 || envy_error 'could not create identity'
@@ -164,7 +210,7 @@ envy_ls() (
 )
 
 case ${1-help} in
-    init|set|get|ls)
+    init|unlock|set|get|ls)
         envy_command=$1
         shift
         "envy_$envy_command" "$@"

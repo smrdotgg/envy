@@ -108,19 +108,13 @@ RESPONSES
 assert_equal "$(git --git-dir="$HOME/default.git" log -1 --format=%an)" 'Configured User' 'configured author name ignored'
 assert_equal "$(git --git-dir="$HOME/default.git" log -1 --format=%ae)" configured@example.invalid 'configured author email ignored'
 
-# Refuse an existing repository here; joining is a later slice.
+# A repository with commits on another branch is populated even if HEAD is unborn.
 XDG_DATA_HOME=$HOME/existing-data
 export XDG_DATA_HOME
-if "$ENVY_BIN" init "$TEST_REMOTE" < /dev/null > existing.out 2> existing.err; then
-    fail 'init treated a populated repository as a new store'
-fi
-grep 'repository is not empty' existing.err > /dev/null || fail 'populated repository not diagnosed'
-[ ! -e "$XDG_DATA_HOME/envy/identity" ] || fail 'populated repository created a new identity'
-[ ! -e "$XDG_DATA_HOME/envy/store" ] || fail 'unsupported join left a store'
-# A repository with commits on another branch is populated even if HEAD is unborn.
 git --git-dir="$TEST_REMOTE" symbolic-ref HEAD refs/heads/unborn
 if "$ENVY_BIN" init "$TEST_REMOTE" < /dev/null > unborn.out 2> unborn.err; then
     fail 'init treated an unborn HEAD as an empty repository'
 fi
-grep 'repository is not empty' unborn.err > /dev/null || fail 'other branches were not detected'
+grep 'store not initialized' unborn.err > /dev/null || fail 'unborn checkout not diagnosed'
 [ ! -e "$XDG_DATA_HOME/envy/identity" ] || fail 'unborn HEAD caused identity creation'
+[ ! -e "$XDG_DATA_HOME/envy/store" ] || fail 'unborn checkout left a store'
