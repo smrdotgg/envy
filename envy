@@ -11,6 +11,9 @@ envy_help() (
         '  set NAME      Store a value from a hidden prompt or stdin' \
         '  get NAME      Print a stored value exactly' \
         '  ls            List secret names without decrypting' \
+        '  project ls|show|edit|rm  Manage central project mappings' \
+        '  run --project <name> -- cmd...  Run with a project environment' \
+        '  env --project <name>  Print shell exports for a project' \
         '  pull          Fetch and rebase local commits onto the remote' \
         '  push          Push local commits, retrying once after a pull' \
         '  sync          Pull, then push local commits' \
@@ -19,8 +22,8 @@ envy_help() (
         '' \
         'Planned commands (not implemented yet):' \
         '  Secrets:  edit, rm, mv' \
-        '  Projects: project ls|show|edit|rm, link, unlink, allow' \
-        '  Using:    run, env, status, check' \
+        '  Projects: link, unlink, allow' \
+        '  Using:    status, check' \
         '  Machine:  hook, config, rekey, doctor, self-update, uninstall'
 )
 
@@ -46,20 +49,27 @@ envy_cleanup() {
         git -C "$envy_store" rebase --abort > /dev/null 2>&1 || :
     fi
     # Only remove our own owner record and an empty lock, never another owner.
-    rmdir "$envy_lock/$$" 2> /dev/null || :
-    rmdir "$envy_lock" 2> /dev/null || :
+    if [ -n "$envy_lock" ]; then
+        rmdir "$envy_lock/$$" 2> /dev/null || :
+        rmdir "$envy_lock" 2> /dev/null || :
+    fi
 }
 
-envy_begin() {
+envy_prepare() {
     envy_paths
     umask 077
     envy_tty_state=
     envy_temp=
     envy_stage=
     envy_rebasing=no
-    envy_lock=$envy_state/lock
+    envy_lock=
     trap 'envy_cleanup' 0
     trap 'exit 1' HUP INT TERM
+}
+
+envy_begin() {
+    envy_prepare
+    envy_lock=$envy_state/lock
     mkdir -p "$envy_state"
     envy_lock_started=$(date +%s)
     while :; do
@@ -397,11 +407,184 @@ envy_ls() (
     done
 )
 
+envy_project_name() {
+    case $1 in
+        ''|[!a-z0-9]*|*[!a-z0-9._-]*)
+            envy_error 'invalid project name; use [a-z0-9][a-z0-9._-]*'
+            ;;
+    esac
+}
+
+# Validate and merge without decrypting. The manifest is a set of file-tested
+# secret names; the table is emitted only after every mapping line is valid.
+envy_resolve() (
+    : > "$envy_temp/names"
+    for envy_file in "$envy_store"/secrets/*.age; do
+        [ -f "$envy_file" ] || continue
+        envy_file=${envy_file##*/}
+        printf '%s\n' "${envy_file%.age}" >> "$envy_temp/names"
+    done
+    : > "$envy_temp/errors"
+    if ENVY_MAP_DISPLAY=$2 ENVY_MAP_ERRORS=$envy_temp/errors LC_ALL=C awk '
+        function error(message, key) {
+            # Report only an identifier, never arbitrary mapping text.
+            key = "(invalid key)"
+            if (match($0, /^[ \t]*[A-Za-z0-9_]+/)) {
+                key = substr($0, RSTART, RLENGTH)
+                sub(/^[ \t]*/, "", key)
+            }
+            print ENVIRON["ENVY_MAP_DISPLAY"] ":" FNR ": " key ": " message > ENVIRON["ENVY_MAP_ERRORS"]
+            failed = 1
+        }
+        FILENAME == ARGV[1] { secrets[$0] = 1; next }
+        $0 == "" || /^#/ { next }
+        {
+            if ($0 ~ /^[[:space:]]/ || $0 ~ /[[:space:]]$/) {
+                error("leading or trailing whitespace is not allowed"); next
+            }
+            count = split($0, parts, "=")
+            alias = parts[1]
+            if (count > 2 || alias !~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+                error("invalid mapping syntax or alias"); next
+            }
+            if (alias ~ /^(ENVY_|_ENVY_)/) {
+                error("reserved alias"); next
+            }
+            secret = (count == 1 ? alias : parts[2])
+            if (secret !~ /^[A-Z_][A-Z0-9_]*$/) {
+                error("invalid secret name or mapping syntax"); next
+            }
+            if (!(secret in secrets)) {
+                error("secret not found: " secret); next
+            }
+            if (!(alias in values)) order[++total] = alias
+            values[alias] = secret
+        }
+        END {
+            if (failed) exit 1
+            for (i = 1; i <= total; i++)
+                print order[i] "\tsecret\t" values[order[i]]
+        }
+    ' "$envy_temp/names" "$1"; then
+        return 0
+    fi
+    cat "$envy_temp/errors" >&2
+    return 1
+)
+
+envy_project() {
+    [ "$#" -ge 1 ] || envy_error 'usage: envy project ls|show|edit|rm [name]'
+    envy_project_action=$1
+    shift
+    case $envy_project_action in
+        ls) [ "$#" -eq 0 ] || envy_error 'usage: envy project ls' ;;
+        show|edit|rm)
+            [ "$#" -eq 1 ] || envy_error "usage: envy project $envy_project_action <name>"
+            envy_project_name "$1"
+            ;;
+        *) envy_error 'usage: envy project ls|show|edit|rm [name]' ;;
+    esac
+    case $envy_project_action in
+        edit|rm) envy_begin ;;
+    esac
+    envy_require_store
+    case $envy_project_action in
+        ls)
+            for envy_project_dir in "$envy_store"/projects/*; do
+                [ -f "$envy_project_dir/map" ] || continue
+                printf '%s\n' "${envy_project_dir##*/}"
+            done
+            ;;
+        show)
+            [ -f "$envy_store/projects/$1/map" ] || envy_error "project not found: $1"
+            cat "$envy_store/projects/$1/map"
+            ;;
+        edit)
+            envy_clean_store
+            envy_temp=$(mktemp -d "$envy_data/.project.XXXXXX") || envy_error 'cannot create temporary directory'
+            envy_map=$envy_store/projects/$1/map
+            if [ -f "$envy_map" ]; then
+                cp "$envy_map" "$envy_temp/map"
+            else
+                : > "$envy_temp/map"
+            fi
+            # EDITOR is a user-supplied shell command and may include options.
+            sh -c 'exec '"${EDITOR:-vi}"' "$1"' envy-editor "$envy_temp/map" ||
+                envy_error 'project editor failed; mapping not saved'
+            envy_resolve "$envy_temp/map" "$envy_map" > "$envy_temp/table" || exit 1
+            if [ -f "$envy_map" ] && cmp -s "$envy_map" "$envy_temp/map"; then
+                return
+            fi
+            mkdir -p "$envy_store/projects/$1"
+            mv "$envy_temp/map" "$envy_map"
+            git -C "$envy_store" add -- "projects/$1/map"
+            envy_commit_push "project edit $1"
+            ;;
+        rm)
+            envy_clean_store
+            [ -f "$envy_store/projects/$1/map" ] || envy_error "project not found: $1"
+            git -C "$envy_store" rm -r --quiet -- "projects/$1"
+            envy_commit_push "project rm $1"
+            ;;
+    esac
+}
+
+envy_environment() {
+    envy_environment_command=$1
+    shift
+    if [ "$#" -lt 2 ] || [ "$1" != --project ]; then
+        envy_error "usage: envy $envy_environment_command --project <name> (run requires -- cmd...)"
+    fi
+    envy_project_name "$2"
+    envy_selected_project=$2
+    shift 2
+    case $envy_environment_command in
+        env) [ "$#" -eq 0 ] || envy_error 'usage: envy env --project <name>' ;;
+        run)
+            if [ "$#" -lt 2 ] || [ "$1" != -- ]; then
+                envy_error 'usage: envy run --project <name> -- cmd...'
+            fi
+            shift
+            envy_inherited_umask=$(umask)
+            ;;
+    esac
+    envy_prepare
+    envy_require_store
+    envy_map=$envy_store/projects/$envy_selected_project/map
+    [ -f "$envy_map" ] || envy_error "project not found: $envy_selected_project"
+    envy_temp=$(mktemp -d "$envy_data/.env.XXXXXX") || envy_error 'cannot create temporary directory'
+    envy_resolve "$envy_map" "$envy_map" > "$envy_temp/table" || exit 1
+    : > "$envy_temp/exports"
+    while IFS="$(printf '\t')" read -r envy_alias envy_kind envy_secret; do
+        [ "$envy_kind" = secret ] || envy_error 'unsupported mapping kind'
+        envy_value=$(age -d -i "$envy_identity" "$envy_store/secrets/$envy_secret.age" 2> /dev/null) ||
+            envy_error "could not decrypt secret: $envy_secret"
+        # Command substitution strips trailing newlines for environment values.
+        envy_quoted=$(printf '%s\n' "$envy_value" | LC_ALL=C sed "s/'/'\\\\''/g")
+        printf "export %s='%s'\n" "$envy_alias" "$envy_quoted" >> "$envy_temp/exports"
+    done < "$envy_temp/table"
+    case $envy_environment_command in
+        env) cat "$envy_temp/exports" ;;
+        run)
+            envy_exports=$(cat "$envy_temp/exports")
+            # Finish cleanup before aliases can replace any script variables.
+            envy_cleanup
+            trap - 0 HUP INT TERM
+            umask "$envy_inherited_umask"
+            eval "$envy_exports"
+            exec "$@"
+            ;;
+    esac
+}
+
 case ${1-help} in
+    run|env)
+        envy_environment "$@"
+        ;;
     pull|push|sync)
         envy_sync_command "$@"
         ;;
-    init|unlock|set|get|ls)
+    init|unlock|set|get|ls|project)
         envy_command=$1
         shift
         "envy_$envy_command" "$@"

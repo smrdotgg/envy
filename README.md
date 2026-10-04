@@ -40,6 +40,34 @@ Store mutations share a lock under
 `${XDG_STATE_HOME:-$HOME/.local/state}/envy`; dead owners are cleared automatically.
 Reads use the local store without waiting for that lock or contacting the remote.
 
+Define a named project's central mapping with your editor, then use it from any
+directory:
+
+```sh
+EDITOR=vi ./envy project edit my-project
+./envy project ls
+./envy project show my-project
+./envy run --project my-project -- your-command arg
+eval "$(./envy env --project my-project)"
+./envy project rm my-project
+```
+
+The mapping accepts `ALIAS=SECRET_NAME` and bare `SECRET_NAME` lines. Aliases use
+letters, digits and underscores, starting with a letter or underscore; prefixes
+`ENVY_` and `_ENVY_` are reserved. Secret names use uppercase letters, digits and
+underscores, starting with a letter or underscore. Project names follow
+`[a-z0-9][a-z0-9._-]*`. Blank lines and comments starting with `#` are ignored.
+Whitespace around assignments and inline comments are errors. The last assignment
+to an alias wins.
+
+Project edits validate the entire mapping before saving, committing and pushing.
+Invalid edits leave the previous mapping intact. Syntax errors and missing secrets
+report the file, line and key; `run` launches nothing and `env` emits nothing.
+Exports preserve quotes and embedded newlines, stripping trailing newlines when
+converting secret values into environment variables. `run` returns the command's
+exit status. Project removal leaves its secrets in the store. Literal values,
+global mappings and automatic project selection are planned for later slices.
+
 For command help and version information:
 
 ```sh
