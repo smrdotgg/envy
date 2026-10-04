@@ -32,6 +32,41 @@ ENVY_INSTALL_SOURCE="$PWD/envy" sh ./install.sh --yes /path/to/store.git
 `ENVY_INSTALL_SOURCE` also accepts a download URL; it defaults to this repository's
 `main/envy`. Downloads are checked with `sh -n` before atomic replacement.
 
+Run `envy doctor` to diagnose the machine. It prints a `PASS` or `FAIL` line
+for dependency versions (age and age-keygen require 1.0 or newer), store format,
+identity match, store cleanliness, remote reachability, installed startup blocks,
+the executable on `PATH`, and ownership and permissions. Any failure returns a
+non-zero status, while the remaining checks still run. The remote check uses
+`git ls-remote` with authentication prompts disabled; it never fetches, pushes
+or decrypts secrets. Local data, store, state and settings directories should
+be owner-only (`0700`), with identity and settings files at `0600`. The executable
+and startup files must belong to the current user and cannot be writable by
+group or other users. Startup symlinks are checked through their targets.
+
+`envy self-update` downloads the `envy` asset from the latest tagged GitHub
+release, validates its shell syntax, shebang and version metadata, and atomically
+replaces the invoked executable. It reports the old and new versions. An empty,
+failed or corrupt download leaves the current version intact. Curl is needed
+for downloads; `ENVY_UPDATE_SOURCE` accepts a URL or local release script for
+offline use. For example:
+
+```sh
+ENVY_UPDATE_SOURCE=/path/to/released-envy envy self-update
+```
+
+The installer and updater trust this public repository. Releases must include
+an `envy` asset with the script's `ENVY_VERSION` metadata. Invoke the actual
+executable path when updating or uninstalling; a final executable symlink is
+refused so it cannot be replaced accidentally.
+
+`envy uninstall` removes the marked envy blocks from `.bashrc` and `.zshrc`
+and removes the invoked executable. It preserves other startup content and
+startup symlinks. It asks through the terminal before deleting the local identity
+and store clone; declining or running without a terminal retains both. Piped
+stdin never supplies deletion consent. Settings, trust approvals and local links
+are retained. The remote store is always untouched. Damaged startup markers
+must be repaired before uninstalling so unrelated content cannot be removed.
+
 Then set, read and list encrypted secrets, or use the script from a checkout:
 
 ```sh

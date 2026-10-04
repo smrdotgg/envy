@@ -43,10 +43,11 @@ def main():
         except OSError:
             os._exit(127)
 
-    # age 1.0, SSH and installer prompts; no platform-specific script flags.
+    # age 1.0, SSH and lifecycle prompts; no platform-specific script flags.
     prompt = re.compile(
         rb"(?:Enter(?: same)?|Confirm) passphrase[^\r\n]*?: |Secret value: "
         rb"|Install age with (?:brew|apt-get)\? \[y/N\]: "
+        rb"|Delete local identity and store clone\? \[y/N\]: "
     )
     pending = b""
     deadline = time.monotonic() + args.timeout

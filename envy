@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+ENVY_VERSION=0.1.0-dev
+
 envy_help() (
     printf '%s\n' \
         'Usage: envy <command>' \
@@ -29,11 +31,11 @@ envy_help() (
         '  pull          Fetch and rebase local commits onto the remote' \
         '  push          Push local commits, retrying once after a pull' \
         '  sync          Pull, then push local commits' \
+        '  doctor        Diagnose dependencies, store and machine setup' \
+        '  self-update   Install the latest tagged release atomically' \
+        '  uninstall     Remove the tool and hooks; offer to delete local store/key' \
         '  version       Print the envy version' \
-        '  help          Show this help' \
-        '' \
-        'Planned commands (not implemented yet):' \
-        '  Machine:  doctor, self-update, uninstall'
+        '  help          Show this help'
 )
 
 envy_error() {
@@ -445,6 +447,27 @@ envy_report_push() {
     esac
 }
 
+envy_git_no_prompt() {
+    # Redirection alone cannot prevent Git/SSH from opening /dev/tty.
+    GIT_TERMINAL_PROMPT=0
+    GIT_ASKPASS=false
+    SSH_ASKPASS=false
+    # SSH honours the first BatchMode option, so configured arguments can
+    # override the appended option. Force its failing askpass helper too.
+    SSH_ASKPASS_REQUIRE=force
+    envy_ssh_command=${GIT_SSH_COMMAND-}
+    if [ -z "$envy_ssh_command" ]; then
+        envy_ssh_command=$(git -C "$envy_store" config core.sshCommand || :)
+    fi
+    if [ -z "$envy_ssh_command" ]; then
+        # GIT_SSH is an executable path, unlike the shell command above.
+        envy_ssh_command=$(printf '%s\n' "${GIT_SSH:-ssh}" | LC_ALL=C sed "s/'/'\\\\''/g")
+        envy_ssh_command=$(printf "'%s'" "$envy_ssh_command")
+    fi
+    GIT_SSH_COMMAND="$envy_ssh_command -oBatchMode=yes"
+    export GIT_TERMINAL_PROMPT GIT_ASKPASS SSH_ASKPASS SSH_ASKPASS_REQUIRE GIT_SSH_COMMAND
+}
+
 envy_sync_command() {
     envy_sync_command_name=$1
     shift
@@ -462,24 +485,7 @@ envy_sync_command() {
         envy_settings_load
         # Another queued refresh may have completed while we waited for a write.
         envy_refresh_due || return 0
-        # Redirection alone cannot prevent Git/SSH from opening /dev/tty.
-        GIT_TERMINAL_PROMPT=0
-        GIT_ASKPASS=false
-        SSH_ASKPASS=false
-        # SSH honours the first BatchMode option, so configured arguments can
-        # override the appended option. Force its failing askpass helper too.
-        SSH_ASKPASS_REQUIRE=force
-        envy_ssh_command=${GIT_SSH_COMMAND-}
-        if [ -z "$envy_ssh_command" ]; then
-            envy_ssh_command=$(git -C "$envy_store" config core.sshCommand || :)
-        fi
-        if [ -z "$envy_ssh_command" ]; then
-            # GIT_SSH is an executable path, unlike the shell command above.
-            envy_ssh_command=$(printf '%s\n' "${GIT_SSH:-ssh}" | LC_ALL=C sed "s/'/'\\\\''/g")
-            envy_ssh_command=$(printf "'%s'" "$envy_ssh_command")
-        fi
-        GIT_SSH_COMMAND="$envy_ssh_command -oBatchMode=yes"
-        export GIT_TERMINAL_PROMPT GIT_ASKPASS SSH_ASKPASS SSH_ASKPASS_REQUIRE GIT_SSH_COMMAND
+        envy_git_no_prompt
     fi
     envy_validate_store "$envy_store"
     envy_clean_store
@@ -1698,6 +1704,261 @@ envy_status() {
     return "$envy_status_failed"
 }
 
+# Resolve the executable's physical parent without readlink's platform flags.
+# Refuse a final symlink rather than replacing/removing the wrong entry.
+envy_script_path() {
+    case $0 in
+        */*) envy_script=$0 ;;
+        *) envy_script=$(command -v "$0") || return 1 ;;
+    esac
+    case $envy_script in */*) ;; *) envy_script=./$envy_script ;; esac
+    envy_script_dir=$(CDPATH='' cd -- "${envy_script%/*}" && pwd -P) ||
+        return 1
+    envy_script=$envy_script_dir/${envy_script##*/}
+    [ -f "$envy_script" ] && [ ! -L "$envy_script" ] ||
+        return 1
+}
+
+envy_hook_block() (
+    LC_ALL=C awk '
+        $0 == "# >>> envy >>>" { starts++; start = NR; inside = 1; next }
+        $0 == "# <<< envy <<<" { ends++; end = NR; inside = 0; next }
+        inside && $0 == "eval \"$(command envy hook)\"" { hook++ }
+        inside && $0 == "export PATH" { path++ }
+        END {
+            if (!starts && !ends) print "absent"
+            else if (starts == 1 && ends == 1 && start < end) {
+                if (hook == 1 && path == 1) print "present"
+                else print "incomplete"
+            } else print "invalid"
+        }
+    ' "$1"
+)
+
+envy_doctor_line() {
+    if [ "$1" = pass ]; then
+        printf 'PASS %s\n' "$2"
+    else
+        printf 'FAIL %s\n' "$2"
+        envy_doctor_failed=1
+    fi
+}
+
+# ls -n provides portable numeric ownership and symbolic modes on both targets.
+# Exact private modes protect local keys/state; public files must not be writable
+# by other users. Do not print paths or file contents in a permission diagnostic.
+envy_permissions() (
+    if [ "$2" = startup ]; then
+        envy_file_info=$(LC_ALL=C ls -Lnd "$1" 2> /dev/null) || exit 1
+    else
+        [ ! -L "$1" ] || exit 1
+        envy_file_info=$(LC_ALL=C ls -nd "$1" 2> /dev/null) || exit 1
+    fi
+    printf '%s\n' "$envy_file_info" | LC_ALL=C awk -v uid="$(id -u)" -v kind="$2" '
+        NR == 1 {
+            mode = substr($1, 1, 10)
+            if ($3 != uid) exit 1
+            if (kind == "directory") exit (mode != "drwx------")
+            if (kind == "identity") exit (mode != "-rw-------")
+            if (substr(mode, 1, 1) != "-" || substr(mode, 2, 1) != "r" ||
+                substr(mode, 6, 1) != "-" || substr(mode, 9, 1) != "-") exit 1
+            if (kind == "executable" && substr(mode, 4, 1) != "x") exit 1
+            exit 0
+        }
+    '
+)
+
+envy_doctor() {
+    [ "$#" -eq 0 ] || envy_error 'usage: envy doctor'
+    envy_paths
+    envy_doctor_failed=0
+    for envy_dependency in git age age-keygen; do
+        if command -v "$envy_dependency" > /dev/null 2>&1 &&
+            envy_dependency_output=$("$envy_dependency" --version 2> /dev/null); then
+            # Only print a parsed numeric version, never arbitrary command output.
+            envy_dependency_version=$(printf '%s\n' "$envy_dependency_output" | LC_ALL=C awk '
+                NR == 1 {
+                    sub(/^git version /, ""); sub(/^v/, "")
+                    if (match($0, /^[0-9]+(\.[0-9]+)+/)) print substr($0, 1, RLENGTH)
+                }
+            ')
+            if [ -n "$envy_dependency_version" ] &&
+                printf '%s\n' "$envy_dependency_version" | awk '{ exit !($0 + 0 >= 1) }'; then
+                envy_doctor_line pass "dependency $envy_dependency: $envy_dependency_version"
+            else
+                envy_doctor_line fail "dependency $envy_dependency: unsupported or unknown version (requires 1.0 or newer)"
+            fi
+        else
+            envy_doctor_line fail "dependency $envy_dependency: missing or cannot report version"
+        fi
+    done
+    if envy_validate_store "$envy_store" > /dev/null 2>&1; then
+        envy_doctor_line pass 'store format'
+    else
+        envy_doctor_line fail 'store format: initialize or update envy'
+    fi
+    if envy_check_identity "$envy_store" "$envy_identity" > /dev/null 2>&1; then
+        envy_doctor_line pass 'identity matches store'
+    else
+        envy_doctor_line fail 'identity: missing, invalid or mismatched; run envy unlock'
+    fi
+    if (envy_clean_store) > /dev/null 2>&1; then
+        envy_doctor_line pass 'store cleanliness'
+    else
+        envy_doctor_line fail 'store cleanliness: dirty, unfinished operation or unavailable'
+    fi
+    if (
+        envy_git_no_prompt
+        # Status and ls-remote are read-only; never fetch, unlock or prompt here.
+        git -C "$envy_store" ls-remote origin < /dev/null
+    ) > /dev/null 2>&1; then
+        envy_doctor_line pass 'remote reachable'
+    else
+        envy_doctor_line fail 'remote reachability: unavailable or authentication required'
+    fi
+    for envy_shell in bash zsh; do
+        envy_rc=$HOME/.${envy_shell}rc
+        if command -v "$envy_shell" > /dev/null 2>&1 || [ -e "$envy_rc" ] || [ -L "$envy_rc" ]; then
+            if [ -f "$envy_rc" ] &&
+                [ "$(envy_hook_block "$envy_rc" 2> /dev/null)" = present ]; then
+                envy_doctor_line pass "hook $envy_shell"
+            else
+                envy_doctor_line fail "hook $envy_shell: missing or damaged startup block; re-run installer"
+            fi
+            if envy_permissions "$envy_rc" startup; then
+                envy_doctor_line pass "permissions $envy_shell startup file"
+            else
+                envy_doctor_line fail "permissions $envy_shell startup file: require current owner and no group/other write access"
+            fi
+        fi
+    done
+    if envy_script_path > /dev/null 2>&1; then
+        envy_path_script=$(command -v envy || :)
+        envy_path_dir=
+        if [ -n "$envy_path_script" ]; then
+            case $envy_path_script in */*) ;; *) envy_path_script=./$envy_path_script ;; esac
+            envy_path_dir=$(CDPATH='' cd -- "${envy_path_script%/*}" && pwd -P) || :
+        fi
+        if [ -n "$envy_path_dir" ] &&
+            [ "$envy_path_dir/${envy_path_script##*/}" = "$envy_script" ]; then
+            envy_doctor_line pass 'PATH resolves this envy executable'
+        else
+            envy_doctor_line fail 'PATH: add the envy install directory or remove a shadowing executable'
+        fi
+        if envy_permissions "$envy_script" executable; then
+            envy_doctor_line pass 'permissions executable'
+        else
+            envy_doctor_line fail 'permissions executable: require owner access and no group/other write access'
+        fi
+    else
+        envy_doctor_line fail 'PATH: cannot locate a regular envy executable'
+        envy_doctor_line fail 'permissions executable: cannot inspect executable'
+    fi
+    for envy_permission_kind in identity data store state config settings; do
+        envy_permission_optional=no
+        envy_permission_mode=directory
+        case $envy_permission_kind in
+            identity) envy_permission_path=$envy_identity; envy_permission_mode=identity ;;
+            data) envy_permission_path=$envy_data ;;
+            store) envy_permission_path=$envy_store ;;
+            state) envy_permission_path=$envy_state ;;
+            config) envy_permission_path=$envy_config_dir; envy_permission_optional=yes ;;
+            settings) envy_permission_path=$envy_config_file; envy_permission_mode=identity; envy_permission_optional=yes ;;
+        esac
+        if [ "$envy_permission_optional" = yes ] &&
+            [ ! -e "$envy_permission_path" ] && [ ! -L "$envy_permission_path" ]; then
+            envy_doctor_line pass "permissions $envy_permission_kind (not created)"
+        elif envy_permissions "$envy_permission_path" "$envy_permission_mode"; then
+            envy_doctor_line pass "permissions $envy_permission_kind"
+        else
+            envy_doctor_line fail "permissions $envy_permission_kind: require current owner, private modes and no symlink"
+        fi
+    done
+    return "$envy_doctor_failed"
+}
+
+envy_uninstall_confirm() (
+    exec 3<> /dev/tty
+    printf 'Delete local identity and store clone? [y/N]: ' >&3
+    IFS= read -r envy_answer <&3 || exit 1
+    case $envy_answer in y|Y|yes|YES) exit 0 ;; *) exit 1 ;; esac
+)
+
+envy_uninstall() {
+    [ "$#" -eq 0 ] || envy_error 'usage: envy uninstall'
+    envy_script_path || envy_error 'envy executable must be a regular file; invoke its actual path'
+    envy_begin
+    envy_temp=$(mktemp -d "$envy_script_dir/.envy-uninstall.XXXXXX") ||
+        envy_error 'cannot create uninstall temporary directory'
+    # Validate and stage both files before removing any startup content.
+    for envy_shell in bash zsh; do
+        envy_rc=$HOME/.${envy_shell}rc
+        if [ -e "$envy_rc" ] || [ -L "$envy_rc" ]; then
+            [ -f "$envy_rc" ] || envy_error 'shell startup file is not a regular file'
+            envy_block=$(envy_hook_block "$envy_rc") || envy_error 'cannot inspect shell startup file'
+            case $envy_block in
+                absent) continue ;;
+                invalid) envy_error 'damaged envy startup markers; repair them before uninstalling' ;;
+            esac
+            cp -p "$envy_rc" "$envy_temp/$envy_shell" || envy_error 'cannot stage shell startup file'
+            sed '/^# >>> envy >>>$/,/^# <<< envy <<<$/{d;}' "$envy_rc" > "$envy_temp/content" ||
+                envy_error 'cannot remove envy startup block'
+            cat "$envy_temp/content" > "$envy_temp/$envy_shell" || envy_error 'cannot stage shell startup file'
+        fi
+    done
+    envy_delete_local=no
+    if [ -e "$envy_identity" ] || [ -L "$envy_identity" ] ||
+        [ -e "$envy_store" ] || [ -L "$envy_store" ]; then
+        if envy_uninstall_confirm 2> /dev/null; then envy_delete_local=yes; fi
+    fi
+    for envy_shell in bash zsh; do
+        [ -f "$envy_temp/$envy_shell" ] || continue
+        envy_rc=$HOME/.${envy_shell}rc
+        if [ -L "$envy_rc" ]; then
+            # Preserve dotfile symlinks and their target's ownership/mode.
+            cat "$envy_temp/$envy_shell" > "$envy_rc" || envy_error 'cannot save shell startup file'
+        else
+            mv "$envy_temp/$envy_shell" "$envy_rc" || envy_error 'cannot save shell startup file'
+        fi
+    done
+    rm -f "$envy_script" || envy_error 'cannot remove envy executable'
+    if [ "$envy_delete_local" = yes ]; then
+        rm -rf "$envy_identity" "$envy_store" || envy_error 'cannot delete local identity and store clone'
+        printf '%s\n' 'envy: uninstalled; local identity and store clone deleted; remote store untouched'
+    else
+        printf '%s\n' 'envy: uninstalled; local identity and store clone retained; remote store untouched'
+    fi
+}
+
+envy_self_update() {
+    [ "$#" -eq 0 ] || envy_error 'usage: envy self-update'
+    envy_script_path || envy_error 'envy executable must be a regular file; invoke its actual path'
+    envy_prepare
+    envy_update_source=${ENVY_UPDATE_SOURCE:-https://github.com/smrdotgg/envy/releases/latest/download/envy}
+    envy_temp=$(mktemp -d "$envy_script_dir/.envy-update.XXXXXX") ||
+        envy_error 'cannot create update temporary directory'
+    if [ -f "$envy_update_source" ]; then
+        cp "$envy_update_source" "$envy_temp/envy" || envy_error 'could not copy update source'
+    else
+        command -v curl > /dev/null 2>&1 ||
+            envy_error 'missing dependency: curl; install curl or set ENVY_UPDATE_SOURCE to a local file'
+        curl -fsSL "$envy_update_source" -o "$envy_temp/envy" > /dev/null 2>&1 ||
+            envy_error 'could not download latest release; current version unchanged'
+    fi
+    [ -s "$envy_temp/envy" ] || envy_error 'downloaded release is empty; current version unchanged'
+    sh -n "$envy_temp/envy" > /dev/null 2>&1 ||
+        envy_error 'downloaded release failed syntax validation; current version unchanged'
+    # Inspect metadata without executing the download before replacement.
+    envy_new_version=$(LC_ALL=C awk '
+        NR == 1 && $0 != "#!/bin/sh" { exit 1 }
+        /^ENVY_VERSION=[A-Za-z0-9][A-Za-z0-9.+_-]*$/ { version = substr($0, 14); count++ }
+        END { if (count == 1) print version; else exit 1 }
+    ' "$envy_temp/envy") || envy_error 'downloaded release is not an envy script; current version unchanged'
+    chmod 755 "$envy_temp/envy" || envy_error 'cannot set update permissions'
+    mv "$envy_temp/envy" "$envy_script" || envy_error 'cannot install update; current version unchanged'
+    printf 'envy: updated %s -> %s\n' "$ENVY_VERSION" "$envy_new_version"
+}
+
 envy_check() {
     [ "$#" -eq 0 ] || envy_error 'usage: envy check'
     envy_prepare
@@ -1741,10 +2002,14 @@ case ${1-help} in
     pull|push|sync)
         envy_sync_command "$@"
         ;;
-    init|unlock|rekey|set|get|edit|ls|rm|mv|project|check|link|unlink|allow|config|status)
+    init|unlock|rekey|set|get|edit|ls|rm|mv|project|check|link|unlink|allow|config|status|doctor|uninstall)
         envy_command=$1
         shift
         "envy_$envy_command" "$@"
+        ;;
+    self-update)
+        shift
+        envy_self_update "$@"
         ;;
     hook)
         shift
@@ -1760,7 +2025,7 @@ case ${1-help} in
             exit 1
         fi
         case ${1-help} in
-            version) printf '%s\n' 'envy 0.1.0-dev' ;;
+            version) printf 'envy %s\n' "$ENVY_VERSION" ;;
             help) envy_help ;;
         esac
         ;;
