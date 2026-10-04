@@ -95,6 +95,8 @@ envy_unlock() {
     envy_dependencies
     envy_paths
     envy_validate_store "$envy_store"
+    [ ! -d "$envy_identity" ] ||
+        envy_error 'local identity path is a directory; move it aside and run envy unlock'
     umask 077
     envy_stage=$(mktemp -d "$envy_data/.unlock.XXXXXX") || envy_error 'cannot create temporary directory'
     trap 'trap "" HUP INT TERM; rm -rf "$envy_stage"' 0

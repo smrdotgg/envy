@@ -73,6 +73,28 @@ output = pathlib.Path(sys.argv[1]).read_bytes()
 assert len(re.findall(rb"Enter passphrase[^\r\n]*?: ", output)) == 1
 assert sorted(p.name for p in pathlib.Path(sys.argv[2]).iterdir()) == ["identity", "store"]
 PY
+
+# A directory at the identity path must not make mv report a false recovery.
+mv "$identity" saved-identity
+mkdir "$identity"
+printf '%s\n' 'keep this file' > "$identity/existing-file"
+if python3 "$TEST_ROOT/tests/pty-helper.py" --transcript directory-terminal \
+    -- "$ENVY_BIN" unlock <<'RESPONSES'
+throwaway-join-passphrase
+RESPONSES
+then
+    fail 'unlock reported success with a directory at the identity path'
+fi
+grep 'local identity path is a directory' directory-terminal > /dev/null || fail 'identity directory not diagnosed'
+if grep 'Enter passphrase' directory-terminal > /dev/null; then
+    fail 'unlock prompted before rejecting the identity directory'
+fi
+[ ! -e "$identity/identity" ] || fail 'unlock put a plaintext identity inside the directory'
+assert_equal "$(cat "$identity/existing-file")" 'keep this file' 'unlock changed the identity directory contents'
+rm "$identity/existing-file"
+rmdir "$identity"
+mv saved-identity "$identity"
+
 git -C "$store" remote set-url origin "$TEST_REMOTE"
 "$ENVY_BIN" set SECOND < expected
 assert_equal "$(git --git-dir="$TEST_REMOTE" log -1 --format=%s)" 'set SECOND' 'joined machine could not write'
