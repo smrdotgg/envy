@@ -1,7 +1,38 @@
 # envy
 
 A personal secrets manager, under development. Create or join a store in a git
-repository, then set, read and list encrypted secrets:
+repository with one command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/smrdotgg/envy/main/install.sh | sh -s -- <store-url>
+```
+
+The installer puts `envy` in `~/.local/bin`, adds a marked block to `~/.bashrc`
+and `~/.zshrc` for each available shell, and runs `envy init` with the store URL.
+Open a new interactive bash or zsh shell to use ambient loading. Each block
+adds the install directory to `PATH` if needed and evaluates `envy hook`, while
+preserving existing startup content. Bash login shells must already source
+`.bashrc` from their login startup file; zsh is the expected shell on macOS.
+
+Git must already be installed. If age or age-keygen is missing, the installer
+asks once and installs age with Homebrew, or apt-get (using sudo when needed).
+Declining stops with manual installation instructions. Confirmations read from
+the terminal, so piping the installer works. Pass `--yes` to skip confirmations;
+age still requires the store passphrase when creating or joining a store.
+Re-running with the same URL preserves a configured machine without prompting
+again. A different URL is refused, and a missing or mismatched identity directs
+you to `envy unlock`. With no URL, installation stops before store initialization.
+
+For an offline installation from a checkout, use a local source:
+
+```sh
+ENVY_INSTALL_SOURCE="$PWD/envy" sh ./install.sh --yes /path/to/store.git
+```
+
+`ENVY_INSTALL_SOURCE` also accepts a download URL; it defaults to this repository's
+`main/envy`. Downloads are checked with `sh -n` before atomic replacement.
+
+Then set, read and list encrypted secrets, or use the script from a checkout:
 
 ```sh
 ./envy init /path/to/store.git
@@ -191,8 +222,8 @@ or decryption error unloads the previous environment and loads nothing.
 The hook checks again after changing directory or invoking `envy`, while
 transitions between subdirectories of the same project skip decryption when
 the mapping and store revision are unchanged. It preserves the previous
-command's exit status and registering it twice is harmless. Startup-file
-installation is a planned slice.
+command's exit status and registering it twice is harmless. The installer adds
+the hook to the startup files of available bash and zsh shells.
 
 `envy config` shows machine-local settings. Ambient loading defaults to on;
 `envy config ambient off` unloads managed variables at the next prompt and

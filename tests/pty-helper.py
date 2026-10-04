@@ -43,8 +43,11 @@ def main():
         except OSError:
             os._exit(127)
 
-    # age 1.0 and SSH fixture prompts; no platform-specific script flags.
-    prompt = re.compile(rb"(?:Enter(?: same)?|Confirm) passphrase[^\r\n]*?: |Secret value: ")
+    # age 1.0, SSH and installer prompts; no platform-specific script flags.
+    prompt = re.compile(
+        rb"(?:Enter(?: same)?|Confirm) passphrase[^\r\n]*?: |Secret value: "
+        rb"|Install age with (?:brew|apt-get)\? \[y/N\]: "
+    )
     pending = b""
     deadline = time.monotonic() + args.timeout
     reaped = False
@@ -96,7 +99,7 @@ def main():
                 pending = pending[match.end():]
                 response = next(responses, None)
                 if response is None:
-                    print("pty: no response supplied for passphrase prompt", file=sys.stderr)
+                    print("pty: no response supplied for terminal prompt", file=sys.stderr)
                     return 1
                 os.write(terminal, response + b"\n")
     finally:

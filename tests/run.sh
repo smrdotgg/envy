@@ -18,6 +18,7 @@ run_test() (
     # Never inherit the engineer's git identity or credentials into fixtures.
     unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GH_TOKEN
     unset ENVY_AMBIENT
+    unset ENVY_INSTALL_SOURCE
     HOME=$test_sandbox/home
     XDG_CONFIG_HOME=$HOME/.config
     XDG_DATA_HOME=$HOME/.local/share
