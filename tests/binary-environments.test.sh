@@ -75,14 +75,15 @@ check_observed() {
     [ ! -e "$HOME/injected" ] || fail 'secret text executed shell syntax'
 }
 check_cleanup() {
-    for path in "$XDG_DATA_HOME/envy"/.env.* "$TMPDIR"/envy-hook.*; do
-        [ ! -e "$path" ] || fail 'environment command left private temporary files'
-    done
+    find "$XDG_DATA_HOME/envy" "$TMPDIR" -print | LC_ALL=C sort > "$HOME/paths-after"
+    cmp "$HOME/paths-before" "$HOME/paths-after" || fail 'environment command left temporary files'
 }
+find "$XDG_DATA_HOME/envy" "$TMPDIR" -print | LC_ALL=C sort > "$HOME/paths-before"
 check_cleanup
 
 # Instrument the real crypto, asserting that decryption writes only to an
-# owner-only file inside an owner-only temporary directory, never a pipe.
+# owner-only file inside a new owner-only directory if it uses a plaintext file.
+# Observe filesystem permissions without depending on temporary path names.
 real_age=$(command -v age)
 export real_age
 mkdir "$HOME/bin"
@@ -93,19 +94,22 @@ import stat
 from pathlib import Path
 
 output = os.fstat(1)
-assert stat.S_ISREG(output.st_mode) and stat.S_IMODE(output.st_mode) == 0o600
-roots = [Path(os.environ['XDG_DATA_HOME']) / 'envy', Path(os.environ['TMPDIR'])]
-found = False
-for root in roots:
-    for directory in root.iterdir():
-        if not directory.is_dir() or not directory.name.startswith(('.env.', 'envy-hook.')):
-            continue
-        for path in directory.iterdir():
-            info = path.stat()
-            if (info.st_dev, info.st_ino) == (output.st_dev, output.st_ino):
-                assert stat.S_IMODE(directory.stat().st_mode) == 0o700
-                found = True
-assert found
+if stat.S_ISREG(output.st_mode):
+    assert stat.S_IMODE(output.st_mode) == 0o600
+    roots = [Path(os.environ['XDG_DATA_HOME']) / 'envy', Path(os.environ['TMPDIR'])]
+    existing_paths = (Path(os.environ['HOME']) / 'paths-before').read_text().splitlines()
+    found = False
+    for root in roots:
+        for directory, _, files in os.walk(root):
+            for name in files:
+                info = (Path(directory) / name).stat()
+                if (info.st_dev, info.st_ino) == (output.st_dev, output.st_ino):
+                    assert stat.S_IMODE(Path(directory).stat().st_mode) == 0o700
+                    assert directory not in existing_paths
+                    found = True
+    assert found
+else:
+    assert stat.S_ISFIFO(output.st_mode)
 PY
 cat > "$HOME/bin/age" <<'AGE'
 #!/bin/sh
