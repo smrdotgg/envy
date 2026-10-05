@@ -32,6 +32,8 @@ git -C "$app" -c user.name=fixture -c user.email=fixture@localhost commit --quie
 git -C "$app" remote add origin "$code_remote"
 git -C "$app" push --quiet origin main
 cd "$app"
+# Approval records physical paths, including when TMPDIR is a macOS symlink.
+app=$(pwd -P)
 "$ENVY_BIN" link app
 cat > .envy <<'MAP'
 Shared=REPO_KEY
@@ -145,14 +147,14 @@ observe
 # preserves prior approvals and never displays arbitrary malformed text.
 cp "$app/.envy" "$HOME/saved-map"
 cp "$XDG_STATE_HOME/envy/allowed" "$HOME/saved-approvals"
-printf 'Good=REPO_KEY\nBad=__literal__("private"text")\nMissing=MISSING\n' > "$app/.envy"
+printf 'Good=REPO_KEY\nBad=__literal__("throwaway-malformed-value-marker"text")\nMissing=MISSING\n' > "$app/.envy"
 for command in check allow; do
     if "$ENVY_BIN" "$command" > "$HOME/invalid.out" 2> "$HOME/invalid.err"; then
         fail 'invalid current project mapping passed validation'
     fi
     grep -F "$app/.envy:2: Bad:" "$HOME/invalid.err" > /dev/null || fail 'syntax error omitted path, line or alias'
     grep -F "$app/.envy:3: Missing: secret not found: MISSING" "$HOME/invalid.err" > /dev/null || fail 'missing secret error omitted location'
-    grep -F 'private' "$HOME/invalid.err" > /dev/null && fail 'malformed mapping text leaked into errors'
+    grep -F 'throwaway-malformed-value-marker' "$HOME/invalid.err" > /dev/null && fail 'malformed mapping text leaked into errors'
     cmp "$HOME/saved-approvals" "$XDG_STATE_HOME/envy/allowed" || fail 'failed validation changed approvals'
 done
 refused

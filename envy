@@ -202,8 +202,11 @@ envy_dependencies() {
 }
 
 envy_name() {
+    # Explicit ASCII characters avoid locale-dependent ranges in macOS sh.
     case $1 in
-        ''|[!A-Z_]*|*[!A-Z0-9_]*) envy_error 'invalid secret name; use [A-Z_][A-Z0-9_]*' ;;
+        ''|[!ABCDEFGHIJKLMNOPQRSTUVWXYZ_]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*)
+            envy_error 'invalid secret name; use [A-Z_][A-Z0-9_]*'
+            ;;
     esac
 }
 
@@ -835,7 +838,8 @@ envy_normalize_remote() (
                 sub(/:[0-9]+$/, "", authority)
                 remote = authority path
             } else {
-                sub(/^[^/]*@/, "", remote)
+                # Escape the delimiter inside the class for BSD awk too.
+                sub(/^[^\/]*@/, "", remote)
                 # A colon before the first slash is SCP syntax.
                 colon = index(remote, ":")
                 slash = index(remote, "/")

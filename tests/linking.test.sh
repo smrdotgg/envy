@@ -36,6 +36,17 @@ observe() (
     cmp "$1" "$HOME/observed" || fail 'run selected the wrong project'
 )
 
+# Automatic status must agree with env/run for every remote spelling and clone.
+observe_remote() (
+    observe "$HOME/expected-app"
+    "$ENVY_BIN" status > "$HOME/status.out" 2> "$HOME/read.err"
+    [ ! -s "$HOME/read.err" ] || fail 'status emitted a diagnostic for a valid remote link'
+    grep -Fx 'Project: app (match: remote)' "$HOME/status.out" > /dev/null ||
+        fail 'status selected the wrong remote project'
+    grep -Fx "Layer central project: present ($store/projects/app/map)" "$HOME/status.out" > /dev/null ||
+        fail 'status omitted the automatically matched central mapping'
+)
+
 # Build a real checkout and a second clone using local git repositories only.
 app=$HOME/app
 code_remote=$HOME/code.git
@@ -73,10 +84,17 @@ revision=$(git -C "$store" rev-parse HEAD)
 # URL spellings all match and linking the same remote twice is idempotent.
 while IFS= read -r remote; do
     git -C "$app" remote set-url origin "$remote"
-    observe "$HOME/expected-app"
     "$ENVY_BIN" link app
+    observe_remote
+    git --git-dir="$TEST_REMOTE" show HEAD:projects/app/remotes > "$HOME/remotes"
+    cmp "$HOME/expected-remotes" "$HOME/remotes" || fail 'equivalent remote did not keep the canonical remote'
     assert_equal "$(git -C "$store" rev-parse HEAD)" "$revision" 'equivalent remote created another commit'
 done <<'REMOTES'
+https://github.com/Owner/Repo.git
+git@github.com:owner/repo
+github.com:owner/repo
+ssh://user@GITHUB.COM:2222/owner/repo.git/
+git://github.com/owner/repo.git
 https://github.com/owner/repo
 HTTPS://GitHub.COM/Owner/Repo.git/
 ssh://git@GITHUB.com:2222/OWNER/REPO.GIT
@@ -92,11 +110,11 @@ REMOTES
 # The second clone needs no link, even at a different path and URL spelling.
 git -C "$HOME/second-clone" remote set-url origin 'https://github.com/OWNER/REPO.git/'
 cd "$HOME/second-clone"
-observe "$HOME/expected-app"
+observe_remote
 git -C "$app" worktree add --quiet -b fixture-worktree "$HOME/worktree"
 mkdir -p "$HOME/worktree/nested"
 cd "$HOME/worktree/nested"
-observe "$HOME/expected-app"
+observe_remote
 
 # Duplicate ownership is refused before creating a project or a commit.
 if "$ENVY_BIN" link other > "$HOME/duplicate.out" 2> "$HOME/duplicate.err"; then

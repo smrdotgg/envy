@@ -60,6 +60,13 @@ for name in OTHER OLD_SUFFIX LITERAL_ONLY PROJECT_ONLY GLOBAL_ONLY; do
     "$ENVY_BIN" set "$name" < value
 done
 
+# Every ASCII letter and digit is valid, including an initial underscore.
+"$ENVY_BIN" set _ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 < value
+"$ENVY_BIN" mv _ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ_9876543210 > /dev/null 2> mv.err
+"$ENVY_BIN" get ABCDEFGHIJKLMNOPQRSTUVWXYZ_9876543210 > actual
+cmp value actual || fail 'valid ASCII secret name changed its value'
+"$ENVY_BIN" rm ABCDEFGHIJKLMNOPQRSTUVWXYZ_9876543210
+
 cat > "$HOME/editor" <<'EDITOR'
 #!/bin/sh
 cp "$HOME/map-input" "$1"
