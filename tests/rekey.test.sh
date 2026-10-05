@@ -107,6 +107,7 @@ import signal
 import subprocess
 import sys
 import termios
+import time
 
 sys.path.insert(0, str(pathlib.Path(os.environ["TEST_ROOT"]) / "tests"))
 sys.dont_write_bytecode = True
@@ -136,6 +137,13 @@ for sig, group in cases:
     child = PtyProcess(command)
     try:
         child.expect(b'Enter passphrase', timeout=10)
+        # age can print its prompt before disabling echo. Interrupt only once
+        # the hidden reader is ready, while draining output under a deadline.
+        deadline = time.monotonic() + 10
+        while termios.tcgetattr(child.terminal)[3] & termios.ECHO:
+            assert child.poll() is None, 'rekey exited before disabling echo'
+            assert time.monotonic() < deadline, 'passphrase reader did not disable echo'
+            child.drain(0.01)
         assert not termios.tcgetattr(child.terminal)[3] & termios.ECHO, 'passphrase input was visible'
         if sig == 'ctrl-c':
             os.write(child.terminal, b'\x03')
