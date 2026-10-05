@@ -49,17 +49,19 @@ assert_no_temp
 grep 'current version unchanged' failed.err > /dev/null || fail 'failure lacks preservation diagnostic'
 
 # Empty, invalid syntax and non-envy shell downloads leave the tool intact.
-for corrupt in empty syntax html plain; do
+for corrupt in empty syntax html plain unrelated; do
     case $corrupt in
         empty) : > corrupt-source ;;
         syntax) printf '#!/bin/sh\nENVY_VERSION=0.3.0\nif broken syntax\n' > corrupt-source ;;
         html) printf '<html>not a release</html>\n' > corrupt-source ;;
         plain) printf '#!/bin/sh\nprintf "not envy\\n"\n' > corrupt-source ;;
+        unrelated) printf '#!/bin/sh\nENVY_VERSION=9.0\ntouch "$HOME/candidate-executed"\n' > corrupt-source ;;
     esac
     if ENVY_UPDATE_SOURCE=$PWD/corrupt-source "$installed" self-update > corrupt.out 2> corrupt.err; then
         fail 'corrupt update succeeded'
     fi
     cmp before "$installed" || fail 'corrupt update replaced current version'
+    [ ! -e "$HOME/candidate-executed" ] || fail 'update executed candidate during validation'
     assert_no_temp
 done
 

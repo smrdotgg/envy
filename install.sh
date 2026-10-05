@@ -129,7 +129,37 @@ else
     curl -fsSL "$install_source" -o "$install_temp/envy" || install_error 'could not download envy'
 fi
 [ -s "$install_temp/envy" ] || install_error 'downloaded envy is empty'
-sh -n "$install_temp/envy" || install_error 'downloaded envy failed shell syntax validation'
+sh -n "$install_temp/envy" > /dev/null 2>&1 || install_error 'downloaded envy failed shell syntax validation'
+# Static sanity check, not authentication. Keep in sync with envy_self_update.
+# Require core entry points and their dispatcher without running the file.
+LC_ALL=C awk '
+    NR == 1 && $0 != "#!/bin/sh" { invalid = 1 }
+    /^ENVY_VERSION=[A-Za-z0-9][A-Za-z0-9.+_-]*$/ { version = substr($0, 14); count++ }
+    {
+        line = $0
+        sub(/^[[:space:]]*/, "", line)
+        sub(/[[:space:]]*$/, "", line)
+        if (line ~ /^envy_(help|init|environment|self_update)\(\)[[:space:]]*[({]$/) {
+            name = line
+            sub(/\(.*/, "", name)
+            functions[name]++
+        }
+        if ($0 == "case ${1-help} in") dispatcher++
+        if (dispatcher) {
+            if (line == "envy_environment \"$@\"") environment_call++
+            if (line == "envy_self_update \"$@\"") update_call++
+            if (line == "help) envy_help ;;") help_call++
+        }
+        if (line != "") last = line
+    }
+    END {
+        if (invalid || count != 1 || functions["envy_help"] != 1 ||
+            functions["envy_init"] != 1 || functions["envy_environment"] != 1 ||
+            functions["envy_self_update"] != 1 || dispatcher != 1 ||
+            environment_call != 1 || update_call != 1 || help_call != 1 || last != "esac") exit 1
+        print version
+    }
+' "$install_temp/envy" > /dev/null || install_error 'downloaded file is not an envy script'
 if [ -d "$install_dir/envy" ]; then
     install_error 'envy install path is a directory'
 fi

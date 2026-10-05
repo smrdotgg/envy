@@ -1987,11 +1987,35 @@ envy_self_update() {
     [ -s "$envy_temp/envy" ] || envy_error 'downloaded release is empty; current version unchanged'
     sh -n "$envy_temp/envy" > /dev/null 2>&1 ||
         envy_error 'downloaded release failed syntax validation; current version unchanged'
-    # Inspect metadata without executing the download before replacement.
+    # Static sanity check, not authentication. Keep in sync with install.sh.
+    # Require core entry points and their dispatcher without running the file.
     envy_new_version=$(LC_ALL=C awk '
-        NR == 1 && $0 != "#!/bin/sh" { exit 1 }
+        NR == 1 && $0 != "#!/bin/sh" { invalid = 1 }
         /^ENVY_VERSION=[A-Za-z0-9][A-Za-z0-9.+_-]*$/ { version = substr($0, 14); count++ }
-        END { if (count == 1) print version; else exit 1 }
+        {
+            line = $0
+            sub(/^[[:space:]]*/, "", line)
+            sub(/[[:space:]]*$/, "", line)
+            if (line ~ /^envy_(help|init|environment|self_update)\(\)[[:space:]]*[({]$/) {
+                name = line
+                sub(/\(.*/, "", name)
+                functions[name]++
+            }
+            if ($0 == "case ${1-help} in") dispatcher++
+            if (dispatcher) {
+                if (line == "envy_environment \"$@\"") environment_call++
+                if (line == "envy_self_update \"$@\"") update_call++
+                if (line == "help) envy_help ;;") help_call++
+            }
+            if (line != "") last = line
+        }
+        END {
+            if (invalid || count != 1 || functions["envy_help"] != 1 ||
+                functions["envy_init"] != 1 || functions["envy_environment"] != 1 ||
+                functions["envy_self_update"] != 1 || dispatcher != 1 ||
+                environment_call != 1 || update_call != 1 || help_call != 1 || last != "esac") exit 1
+            print version
+        }
     ' "$envy_temp/envy") || envy_error 'downloaded release is not an envy script; current version unchanged'
     chmod 755 "$envy_temp/envy" || envy_error 'cannot set update permissions'
     mv "$envy_temp/envy" "$envy_script" || envy_error 'cannot install update; current version unchanged'

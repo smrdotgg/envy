@@ -75,8 +75,9 @@ and startup files must belong to the current user and cannot be writable by
 group or other users. Startup symlinks are checked through their targets.
 
 `envy self-update` downloads the `envy` asset from the latest tagged GitHub
-release, validates its shell syntax, shebang and version metadata, and atomically
-replaces the invoked executable. It reports the old and new versions. An empty,
+release, validates its shell syntax, shebang, version metadata, core functions
+and command dispatcher, and atomically replaces the invoked executable. It
+reports the old and new versions. An empty,
 failed or corrupt download leaves the current version intact. Curl is needed
 for downloads; `ENVY_UPDATE_SOURCE` accepts a URL or local release script for
 offline use. For example:
@@ -85,8 +86,11 @@ offline use. For example:
 ENVY_UPDATE_SOURCE=/path/to/released-envy envy self-update
 ```
 
-The installer and updater trust this public repository. Releases must include
-an `envy` asset with the script's `ENVY_VERSION` metadata. Invoke the actual
+The installer and updater trust this public repository and apply the same
+static sanity check before replacement. Validation guards against wrong or
+corrupt downloads; it does not authenticate the source, and the candidate is
+never executed during validation. Releases must include an `envy` asset with
+the script's `ENVY_VERSION` metadata and program structure. Invoke the actual
 executable path when updating or uninstalling; a final executable symlink is
 refused so it cannot be replaced accidentally.
 
