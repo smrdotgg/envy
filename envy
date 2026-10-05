@@ -1352,10 +1352,19 @@ envy_environment_exports() {
         envy_value=${envy_value%.}
         if [ "$envy_kind" = secret ]; then
             envy_secret=$envy_value
+            # Shell variables cannot hold NUL. Validate the decrypted bytes in
+            # the private directory before any command substitution can lose them.
+            age -d -i "$envy_identity" "$envy_store/secrets/$envy_secret.age" \
+                > "$envy_temp/value" 2> /dev/null || envy_error "could not decrypt secret: $envy_secret"
+            LC_ALL=C tr -d '\000' < "$envy_temp/value" > "$envy_temp/without-nul" ||
+                envy_error "could not inspect secret: $envy_secret"
+            cmp -s "$envy_temp/value" "$envy_temp/without-nul" ||
+                envy_error "secret contains a NUL byte: $envy_secret; use envy get $envy_secret"
             envy_value=$(
-                age -d -i "$envy_identity" "$envy_store/secrets/$envy_secret.age" 2> /dev/null || exit 1
+                cat "$envy_temp/value" || exit 1
                 printf '.'
-            ) || envy_error "could not decrypt secret: $envy_secret"
+            ) || envy_error "could not read secret: $envy_secret"
+            rm -f "$envy_temp/value" "$envy_temp/without-nul"
             # A sentinel keeps command substitution from stripping newlines.
             envy_value=${envy_value%.}
         fi

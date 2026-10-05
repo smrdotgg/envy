@@ -265,7 +265,11 @@ still applies and requires approval. Approval paths cannot contain newlines.
 Project edits validate the entire mapping before saving, committing and pushing.
 Invalid edits leave the previous mapping intact. Syntax errors and missing secrets
 report the file, line and key; `run` launches nothing and `env` emits nothing.
-Exports preserve quotes and all newlines, including trailing newlines. `run`
+Exports preserve quotes and all newlines, including trailing newlines, and
+non-UTF-8 bytes. Binary values containing NUL bytes are available through `get`
+only: `set` and `get` preserve them exactly, but `env`, `run` and the ambient hook
+reject their mappings with a diagnostic naming the secret and load nothing.
+Environment variables cannot contain NUL bytes. `run`
 returns the command's exit status. Project removal leaves its secrets in the store.
 `check` validates the global mapping, every central project mapping and the
 current root's `.envy`, even before approval. It reports all errors with their
