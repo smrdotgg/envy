@@ -14,9 +14,11 @@ import os
 import pty
 import re
 import select
-import signal
 import sys
 import time
+
+sys.dont_write_bytecode = True
+from pty_support import kill_process_group
 
 
 def main():
@@ -105,10 +107,7 @@ def main():
                 os.write(terminal, response + b"\n")
     finally:
         if not reaped:
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            kill_process_group(pid)
             os.waitpid(pid, 0)
         os.close(terminal)
         if transcript is not None:

@@ -11,11 +11,15 @@ RESPONSES
 python3 - <<'PY'
 import os
 import pathlib
-import pty
-import select
 import signal
 import subprocess
+import sys
+import termios
 import time
+
+sys.path.insert(0, str(pathlib.Path(os.environ["TEST_ROOT"]) / "tests"))
+sys.dont_write_bytecode = True
+from pty_support import PtyProcess, kill_process_group
 
 tool = os.environ["ENVY_BIN"]
 store = pathlib.Path(os.environ["XDG_DATA_HOME"]) / "envy/store"
@@ -43,22 +47,12 @@ def start(*args, value=None):
 
 
 def start_held(name):
-    terminal, slave = pty.openpty()
-    terminals.append(terminal)
-    process = subprocess.Popen(
-        [tool, "set", name], stdin=slave, stdout=slave, stderr=slave,
-        start_new_session=True,
-    )
-    os.close(slave)
+    process = PtyProcess([tool, "set", name])
+    terminals.append(process)
     children.append(process)
-    output = b""
-    deadline = time.monotonic() + 10
-    while b"Secret value: " not in output:
-        assert process.poll() is None, "set exited before prompting"
-        assert time.monotonic() < deadline, "set did not prompt"
-        if select.select([terminal], [], [], 0.1)[0]:
-            output += os.read(terminal, 4096)
-    return process, terminal
+    process.expect(b"Secret value: ")
+    assert not termios.tcgetattr(process.terminal)[3] & termios.ECHO, "set did not hide input"
+    return process, process.terminal
 
 
 def finish(process):
@@ -69,6 +63,11 @@ def finish(process):
 
 
 try:
+    # Exercise cleanup after a real CLI child and its process group have gone.
+    completed = start("version")
+    finish(completed)
+    kill_process_group(completed.pid)
+
     finish(start("set", "CACHED", value=b"cached throwaway value"))
     holder, terminal = start_held("HELD")
     writer = start("set", "WAITING", value=b"waiting throwaway value")
@@ -79,6 +78,8 @@ try:
     assert subprocess.check_output([tool, "ls"], timeout=2) == b"CACHED\n"
     os.write(terminal, b"held throwaway value\n")
     finish(holder)
+    assert b"held throwaway value" not in holder.output, "set echoed its secret"
+    assert termios.tcgetattr(terminal) == holder.original_state, "set did not restore terminal state"
     finish(writer)
     assert b"up to date" in finish(sync)
     assert run(tool, "get", "HELD") == b"held throwaway value"
@@ -118,6 +119,7 @@ try:
     interrupted, terminal = start_held("INTERRUPTED")
     os.killpg(interrupted.pid, signal.SIGTERM)
     interrupted.communicate(timeout=10)
+    assert termios.tcgetattr(terminal) == interrupted.original_state, "interrupted set did not restore terminal state"
     assert interrupted.returncode != 0, "interrupted set reported success"
     assert not lock.exists(), "interrupted command left a lock"
     run(tool, "sync")
@@ -125,8 +127,8 @@ try:
 finally:
     for process in children:
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
+            kill_process_group(process.pid)
             process.communicate(timeout=10)
-    for terminal in terminals:
-        os.close(terminal)
+    for process in terminals:
+        process.close()
 PY

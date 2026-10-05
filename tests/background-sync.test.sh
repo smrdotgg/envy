@@ -89,11 +89,14 @@ chmod +x "$SYNC_TEST_DIR/bin/git"
 python3 - <<'PY'
 import os
 import pathlib
-import pty
-import select
-import signal
 import subprocess
+import sys
+import termios
 import time
+
+sys.path.insert(0, str(pathlib.Path(os.environ["TEST_ROOT"]) / "tests"))
+sys.dont_write_bytecode = True
+from pty_support import PtyProcess, kill_process_group
 
 home = pathlib.Path(os.environ["HOME"])
 root = pathlib.Path(os.environ["SYNC_TEST_DIR"])
@@ -101,6 +104,7 @@ tool = os.environ["ENVY_BIN"]
 real_git = os.environ["REAL_GIT"]
 store = pathlib.Path(os.environ["XDG_DATA_HOME"]) / "envy/store"
 last_fetch = pathlib.Path(os.environ["XDG_STATE_HOME"]) / "envy/last-fetch"
+lock = pathlib.Path(os.environ["XDG_STATE_HOME"]) / "envy/lock"
 original_env = os.environ.copy()
 env = original_env.copy()
 env["PATH"] = str(root / "bin") + ":" + str(home / "bin") + ":" + env["PATH"]
@@ -242,17 +246,12 @@ printf '%s' "$REFRESH_TOKEN" > "$SYNC_TEST_DIR/after"
     # release, queued requests recheck freshness and make only one fetch.
     reset()
     configure(14400)
-    terminal, slave = pty.openpty()
-    terminals.append(terminal)
-    holder = subprocess.Popen([tool, "set", "HELD"], env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+    holder = PtyProcess([tool, "set", "HELD"], env=env)
+    terminals.append(holder)
     children.append(holder)
-    os.close(slave)
-    output = b""
-    deadline = time.monotonic() + 6
-    while b"Secret value: " not in output:
-        assert holder.poll() is None and time.monotonic() < deadline, "writer did not acquire lock"
-        if select.select([terminal], [], [], 0.05)[0]:
-            output += os.read(terminal, 4096)
+    terminal = holder.terminal
+    holder.expect(b"Secret value: ", timeout=6)
+    assert not termios.tcgetattr(terminal)[3] & termios.ECHO, "writer did not hide input"
     last_fetch.write_text("0\n")
     read_value(new)
     run(tool, "hook-env", timeout=2)
@@ -261,12 +260,15 @@ printf '%s' "$REFRESH_TOKEN" > "$SYNC_TEST_DIR/after"
     os.write(terminal, b"held throwaway credential\n")
     holder.communicate(timeout=4)
     assert holder.returncode == 0, "held writer failed"
+    assert b"held throwaway credential" not in holder.output, "writer echoed its secret"
+    assert termios.tcgetattr(terminal) == holder.original_state, "writer did not restore terminal state"
     # Ignore the writer's push when waiting for the refresh's own push.
     wait_for(lambda: "fetch" in events(), "queued refresh did not start")
     (root / "release").touch()
     wait_for(lambda: events().count("pushed") == 2, "queued refresh did not finish")
     configure(14400)
     time.sleep(1.2)
+    assert not lock.exists(), "completed writer and refresh left a lock"
     assert events().count("fetch") == 1, "queued refresh failed to recheck freshness"
     assert run(tool, "get", "HELD") == b"held throwaway credential", "background sync lost a concurrent write"
     assert run(real_git, "-C", str(store), "status", "--porcelain") == b"", "background sync dirtied store"
@@ -298,8 +300,8 @@ finally:
     (root / "next").touch()
     for process in children:
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
+            kill_process_group(process.pid)
             process.communicate(timeout=4)
-    for terminal in terminals:
-        os.close(terminal)
+    for process in terminals:
+        process.close()
 PY
