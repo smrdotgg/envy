@@ -99,40 +99,65 @@ assert_equal "$(git -C "$store" rev-parse HEAD)" "$before" 'failed rekey did not
 cmp old-identity "$first_identity" || fail 'failed passphrase replaced identity'
 assert_clean
 
-# Interrupting a passphrase prompt cleans temporary keys and releases the lock.
-python3 - <<'PY'
+# Each handled signal must stop the prompt, preserving keys, store and terminal.
+python3 - <<'PYTHON'
 import os
-import pty
-import select
+import pathlib
 import signal
-import time
+import subprocess
+import sys
+import termios
 
-pid, terminal = pty.fork()
-if pid == 0:
-    os.execv(os.environ['ENVY_BIN'], [os.environ['ENVY_BIN'], 'rekey'])
-reaped = False
-try:
-    output = b''
-    deadline = time.monotonic() + 10
-    while b'Enter passphrase' not in output:
-        assert time.monotonic() < deadline, 'rekey did not prompt'
-        if select.select([terminal], [], [], 0.1)[0]:
-            output += os.read(terminal, 4096)
-    os.killpg(pid, signal.SIGTERM)
-    while True:
-        ended, status = os.waitpid(pid, os.WNOHANG)
-        if ended:
-            reaped = True
-            assert not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0
-            break
-        assert time.monotonic() < deadline, 'interrupted rekey did not exit'
-        time.sleep(0.01)
-finally:
-    if not reaped:
-        os.killpg(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
-    os.close(terminal)
-PY
+sys.path.insert(0, str(pathlib.Path(os.environ["TEST_ROOT"]) / "tests"))
+sys.dont_write_bytecode = True
+from pty_support import PtyProcess, kill_process_group
+
+tool = os.environ['ENVY_BIN']
+data = pathlib.Path(os.environ['XDG_DATA_HOME']) / 'envy'
+store = data / 'store'
+identity = (data / 'identity').read_bytes()
+lock = pathlib.Path(os.environ['XDG_STATE_HOME']) / 'envy/lock'
+
+
+def git(*args):
+    return subprocess.check_output(['git', *args], timeout=10)
+
+
+revision = git('-C', str(store), 'rev-parse', 'HEAD')
+remote = git('--git-dir=' + os.environ['TEST_REMOTE'], 'rev-parse', 'HEAD')
+cases = [(sig, group) for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+         for group in (False, True)]
+# Ctrl-C from the terminal and a redirected stdin exercise the user-facing paths.
+cases += [('ctrl-c', True), (signal.SIGTERM, 'redirected')]
+for sig, group in cases:
+    command = [tool, 'rekey']
+    if group == 'redirected':
+        command = ['sh', '-c', 'exec "$ENVY_BIN" rekey < /dev/null']
+    child = PtyProcess(command)
+    try:
+        child.expect(b'Enter passphrase', timeout=10)
+        assert not termios.tcgetattr(child.terminal)[3] & termios.ECHO, 'passphrase input was visible'
+        if sig == 'ctrl-c':
+            os.write(child.terminal, b'\x03')
+        elif group is True:
+            os.killpg(child.pid, sig)
+        else:
+            os.kill(child.pid, sig)
+        # wait starts a fresh exit deadline and drains output throughout cleanup.
+        assert child.wait(timeout=5) != 0, 'interrupted rekey succeeded'
+        assert termios.tcgetattr(child.terminal) == child.original_state, 'rekey did not restore terminal'
+        assert (data / 'identity').read_bytes() == identity, 'interrupt replaced identity'
+        assert sorted(p.name for p in data.iterdir()) == ['identity', 'store'], 'interrupt left temporary keys'
+        assert not lock.exists(), 'interrupt retained lock'
+        assert git('-C', str(store), 'rev-parse', 'HEAD') == revision, 'interrupt committed'
+        assert git('--git-dir=' + os.environ['TEST_REMOTE'], 'rev-parse', 'HEAD') == remote, 'interrupt pushed'
+        assert git('-C', str(store), 'status', '--porcelain') == b'', 'interrupt changed store'
+    finally:
+        # Also exercise cleanup after the CLI and its process group have exited.
+        kill_process_group(child.pid)
+        child.wait(timeout=5)
+        child.close()
+PYTHON
 cmp old-identity "$first_identity" || fail 'interrupted rekey replaced identity'
 assert_equal "$(git -C "$store" rev-parse HEAD)" "$before" 'interrupted rekey changed history'
 assert_clean
