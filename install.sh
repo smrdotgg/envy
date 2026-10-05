@@ -97,6 +97,9 @@ while [ "$#" -gt 0 ]; do
             if [ "$#" -gt 1 ] || [ -n "$install_url" ]; then
                 install_error 'usage: install.sh [--yes] [<store-url>]'
             fi
+            if [ "$#" -eq 1 ] && [ -z "$1" ]; then
+                install_error 'usage: install.sh [--yes] [<store-url>]'
+            fi
             install_url=${1-}
             break
             ;;

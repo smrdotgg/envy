@@ -34,6 +34,37 @@ for root in sys.argv[1:]:
 PY
 }
 
+# Invalid URLs must fail before creating anything in a fresh home.
+reject_install() (
+    use_home "$1"
+    shift
+    if dash "$TEST_ROOT/install.sh" "$@" < /dev/null > args.out 2> args.err; then
+        fail 'installer accepted invalid URL arguments'
+    else
+        assert_equal "$?" 1 'invalid URL arguments returned a different exit code'
+    fi
+    [ ! -s args.out ] || fail 'invalid URL arguments produced standard output'
+    printf '%s\n' 'envy installer: usage: install.sh [--yes] [<store-url>]' > args.expected
+    cmp args.expected args.err || fail 'invalid URL arguments lack the exact usage message'
+    assert_equal "$(find "$HOME" -print)" "$HOME" 'invalid URL arguments wrote files or directories'
+)
+reject_install empty-url ''
+reject_install empty-url-after-separator -- ''
+reject_install empty-url-with-yes --yes -- ''
+reject_install extra-url-after-separator -- "$TEST_REMOTE" extra
+
+# A separator without an argument still performs a no-URL installation.
+use_home separator-no-url
+dash "$TEST_ROOT/install.sh" -- < /dev/null > separator.out 2> separator.err
+[ -x "$HOME/.local/bin/envy" ] || fail 'bare separator did not install an executable'
+cmp "$ENVY_BIN" "$HOME/.local/bin/envy" || fail 'bare separator installed a different script'
+[ ! -e "$XDG_DATA_HOME/envy" ] || fail 'bare separator initialized a store'
+[ ! -s separator.err ] || fail 'bare separator prompted or failed'
+for rc in .bashrc .zshrc; do
+    assert_equal "$(grep -c '^# >>> envy >>>$' "$HOME/$rc")" 1 'bare separator omitted startup block'
+    assert_equal "$(grep -c '^# <<< envy <<<$' "$HOME/$rc")" 1 'bare separator omitted startup end marker'
+done
+
 # No URL installs only the executable and shell startup blocks, with no prompt.
 use_home first
 printf 'export KEEP_STARTUP=yes' > "$HOME/.bashrc"
@@ -130,7 +161,7 @@ assert_equal "$(git -C "$store" status --porcelain)" '' 'installer dirtied confi
 # Joining on another machine uses exactly one prompt, even from a script pipe.
 use_home second
 python3 "$TEST_ROOT/tests/pty-helper.py" --transcript join-terminal -- \
-    dash -c 'cat "$TEST_ROOT/install.sh" | dash -s -- "$TEST_REMOTE"' <<'RESPONSES'
+    dash -c 'cat "$TEST_ROOT/install.sh" | dash -s -- -- "$TEST_REMOTE"' <<'RESPONSES'
 throwaway-installer-passphrase
 RESPONSES
 python3 - join-terminal <<'PY'
