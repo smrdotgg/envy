@@ -299,12 +299,18 @@ for command in env run; do
 done
 rm "$store/projects/local-project/remotes" "$store/projects/offline/remotes"
 
+# Split only the fixed argument table below, with pathname expansion disabled.
+set -f
 for args in 'link app extra' 'link --unknown' 'link --local --local' 'link Upper' 'link ../escape' 'unlink extra'; do
-    if printf '%s\n' "$args" | xargs "$ENVY_BIN" > "$HOME/args.out" 2> "$HOME/args.err"; then
+    # Intentional splitting of the fixed table above; globbing is disabled.
+    # shellcheck disable=SC2086
+    set -- $args
+    if "$ENVY_BIN" "$@" > "$HOME/args.out" 2> "$HOME/args.err"; then
         fail 'invalid link arguments succeeded'
     fi
     [ ! -s "$HOME/args.out" ] && [ -s "$HOME/args.err" ] || fail 'invalid link arguments lacked a diagnostic'
 done
+set +f
 assert_equal "$(git -C "$store" status --porcelain)" '' 'link commands left store changes behind'
 assert_equal "$(git -C "$store" rev-parse HEAD)" "$(git --git-dir="$TEST_REMOTE" rev-parse HEAD)" 'link changes did not reach the remote'
 git -C "$store" ls-tree -r --name-only HEAD > "$HOME/tracked-files"

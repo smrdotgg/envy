@@ -159,12 +159,18 @@ for name in '' lowercase 1DIGIT '../ESCAPE' 'A B'; do
     fi
     grep 'invalid secret name' rejected.err > /dev/null || fail 'invalid edit name not diagnosed'
 done
+# Split only the fixed argument table below, with pathname expansion disabled.
+set -f
 for args in '' 'KEY extra'; do
-    if printf '%s\n' "$args" | xargs "$ENVY_BIN" edit > rejected.out 2> rejected.err; then
+    # Intentional splitting of the fixed table above; globbing is disabled.
+    # shellcheck disable=SC2086
+    set -- $args
+    if "$ENVY_BIN" edit "$@" > rejected.out 2> rejected.err; then
         fail 'invalid edit arguments accepted'
     fi
     grep 'usage: envy edit NAME' rejected.err > /dev/null || fail 'edit argument error lacks usage'
 done
+set +f
 printf '%s\n' unrelated > "$store/unrelated"
 if "$ENVY_BIN" edit KEY > rejected.out 2> rejected.err; then
     fail 'edit accepted a dirty store'

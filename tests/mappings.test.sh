@@ -225,13 +225,19 @@ for command in env run; do
 done
 mv "$XDG_DATA_HOME/envy/saved-identity" "$XDG_DATA_HOME/envy/identity"
 
+# Split only the fixed argument table below, with pathname expansion disabled.
+set -f
 for args in 'env --project' 'env demo' 'env --project absent' 'env --project demo extra' \
     'run' 'run --project' 'run --project demo' 'run --project demo --' 'run --project demo dash' \
     'run --project ../escape -- true' 'run --project absent -- true'; do
-    if printf '%s\n' "$args" | xargs "$ENVY_BIN" > args.out 2> args.err; then
+    # Intentional splitting of the fixed table above; globbing is disabled.
+    # shellcheck disable=SC2086
+    set -- $args
+    if "$ENVY_BIN" "$@" > args.out 2> args.err; then
         fail 'invalid environment arguments were accepted'
     fi
     [ ! -s args.out ] && [ -s args.err ] || fail 'invalid arguments did not fail quietly'
 done
+set +f
 set -- "$XDG_DATA_HOME/envy"/.env.*
 [ ! -e "$1" ] || fail 'environment command left temporary files'

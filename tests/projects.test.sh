@@ -110,18 +110,23 @@ for action in show rm; do
     grep 'project not found: demo' missing.err > /dev/null || fail 'missing project not diagnosed'
 done
 
+# Split only the fixed argument table below, with pathname expansion disabled.
+set -f
+for args in '' 'unknown' 'ls extra' 'show' 'show demo extra' 'edit' 'rm'; do
+    # Intentional splitting of the fixed table above; globbing is disabled.
+    # shellcheck disable=SC2086
+    set -- $args
+    if "$ENVY_BIN" project "$@" > args.out 2> args.err; then
+        fail 'invalid project arguments were accepted'
+    fi
+    grep 'usage: envy project' args.err > /dev/null || fail 'project argument error lacks usage'
+done
+set +f
 for name in '' ../escape Upper 'two words' '-option' '.hidden' 'a/b'; do
     if "$ENVY_BIN" project edit "$name" > name.out 2> name.err; then
         fail 'invalid project name was accepted'
     fi
     grep 'invalid project name' name.err > /dev/null || fail 'invalid project name not diagnosed'
-done
-for args in '' 'unknown' 'ls extra' 'show' 'show demo extra' 'edit' 'rm'; do
-    # Split this fixed argument table only; no user data is evaluated.
-    if printf '%s\n' "$args" | xargs "$ENVY_BIN" project > args.out 2> args.err; then
-        fail 'invalid project arguments were accepted'
-    fi
-    grep 'usage: envy project' args.err > /dev/null || fail 'project argument error lacks usage'
 done
 assert_equal "$(git -C "$store" status --porcelain)" '' 'project commands left the store dirty'
 set -- "$XDG_DATA_HOME/envy"/.project.*

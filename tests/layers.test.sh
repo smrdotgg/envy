@@ -253,13 +253,19 @@ cmp expected-check check.out || fail 'offline check changed the result'
 assert_equal "$(git -C "$store" rev-parse HEAD)" "$revision_after_project" 'check changed store history'
 assert_equal "$(git -C "$store" status --porcelain)" '' 'layer commands left a dirty store'
 
+# Split only the fixed argument table below, with pathname expansion disabled.
+set -f
 for args in 'project show --global extra' 'project edit --global extra' 'project rm --global' \
     'check extra' 'env --global' 'run --'; do
-    if printf '%s\n' "$args" | xargs "$ENVY_BIN" > args.out 2> args.err; then
+    # Intentional splitting of the fixed table above; globbing is disabled.
+    # shellcheck disable=SC2086
+    set -- $args
+    if "$ENVY_BIN" "$@" > args.out 2> args.err; then
         fail 'invalid global/check arguments were accepted'
     fi
     [ ! -s args.out ] && [ -s args.err ] || fail 'argument refusal lacks diagnostic'
 done
+set +f
 # Later --project arguments belong to the child command.
 "$ENVY_BIN" run -- dash -c '[ "$1" = extra ] && [ "$2" = --project ] && [ "$3" = demo ]' child extra --project demo
 set -- "$XDG_DATA_HOME/envy"/.project.* "$XDG_DATA_HOME/envy"/.env.* "$XDG_DATA_HOME/envy"/.check.*
