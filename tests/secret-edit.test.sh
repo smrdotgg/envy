@@ -15,6 +15,7 @@ import os
 import pathlib
 import stat
 import sys
+import termios
 import time
 
 assert sys.argv[1] == "--fixture-option", "EDITOR options were not preserved"
@@ -34,8 +35,16 @@ elif mode == "stdin":
     value.write_bytes(sys.stdin.buffer.read())
 elif mode == "terminal":
     assert sys.stdin.isatty(), "editor did not receive terminal stdin"
+    terminal = sys.stdin.fileno()
+    original = termios.tcgetattr(terminal)
+    hidden = original[:]
+    hidden[3] &= ~termios.ECHO
     print("Secret value: ", end="", flush=True)
-    value.write_bytes(sys.stdin.buffer.readline())
+    termios.tcsetattr(terminal, termios.TCSANOW, hidden)
+    try:
+        value.write_bytes(sys.stdin.buffer.readline())
+    finally:
+        termios.tcsetattr(terminal, termios.TCSANOW, original)
 elif mode == "remove":
     value.unlink()
 elif mode == "symlink":
@@ -125,7 +134,15 @@ EDITOR_MODE=stdin "$ENVY_BIN" edit FALLBACK < "$HOME/edit-input"
 cmp "$HOME/edit-input" actual || fail 'editor did not receive piped stdin'
 assert_clean_edit
 printf 'throwaway terminal edited value\n' > "$HOME/edit-input"
-EDITOR_MODE=terminal python3 "$TEST_ROOT/tests/pty-helper.py" -- "$ENVY_BIN" edit FALLBACK < "$HOME/edit-input"
+EDITOR_MODE=terminal python3 "$TEST_ROOT/tests/pty-helper.py" --transcript edit-terminal -- "$ENVY_BIN" edit FALLBACK < "$HOME/edit-input"
+python3 - <<'PY'
+import os
+import pathlib
+output = pathlib.Path('edit-terminal').read_bytes()
+value = pathlib.Path(os.environ['HOME'], 'edit-input').read_bytes().rstrip(b'\n')
+assert value not in output, 'editor terminal exposed a secret value'
+assert b'throwaway-edit-passphrase' not in output, 'editor terminal exposed a passphrase'
+PY
 "$ENVY_BIN" get FALLBACK > actual
 cmp "$HOME/edit-input" actual || fail 'editor did not receive terminal input'
 cp "$HOME/edit-input" "$HOME/expected-current"
