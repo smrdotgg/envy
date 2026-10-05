@@ -1392,14 +1392,14 @@ envy_environment() {
             trap - 0 HUP INT TERM
             envy_refresh_background || :
             umask "$envy_inherited_umask"
-            # Fatal assignments can run the EXIT trap before eval restores
-            # stderr. Save it for the fixed diagnostic, and exit explicitly:
-            # Bash 3.2 otherwise returns the successful printf's status.
-            exec 9>&2
-            trap 'printf "%s\n" "envy: could not export project environment" >&9; exit 1' 0
+            # Check in a subshell: Bash 3.2 can report success on a fatal
+            # assignment in a conditional. Require the completion marker too.
+            # The parent reports refusal without borrowing a child's descriptor.
+            if [ "$(eval "$envy_exports" 2> /dev/null && printf '%s' ok)" != ok ]; then
+                printf '%s\n' 'envy: could not export project environment' >&2
+                exit 1
+            fi
             eval "$envy_exports" 2> /dev/null
-            trap - 0
-            exec 9>&-
             exec "$@"
             ;;
     esac

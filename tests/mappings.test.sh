@@ -121,7 +121,8 @@ printf '7' > numeric-special
 "$ENVY_BIN" set NUMERIC_SPECIAL < numeric-special
 for run_shell in dash /bin/sh "$HOME/sh"; do
     for special_alias in OPTIND UID PPID SHELLOPTS; do
-        printf 'Good=SECRET\n%s=_SECOND\n' "$special_alias" > "$HOME/map-input"
+        # A later valid export must not conceal refusal of the middle alias.
+        printf 'Good=SECRET\n%s=_SECOND\nAfter=SECRET\n' "$special_alias" > "$HOME/map-input"
         "$ENVY_BIN" project edit shell-special
         rm -f special-child-ran
         special_refused=no
@@ -164,12 +165,18 @@ for run_shell in dash /bin/sh "$HOME/sh"; do
     done
     # Successful runs preserve the child status, mask and inherited descriptors.
     "$run_shell" "$ENVY_BIN" run --project shell-special -- \
-        dash -c 'umask; printf descriptor >&3; exit 37' \
-        3> child-descriptor > special.out 2> special.err && status=0 || status=$?
+        dash -c 'umask; printf descriptor >&3; printf descriptor-nine >&9; exit 37' \
+        3> child-descriptor 9> child-descriptor-nine > special.out 2> special.err && status=0 || status=$?
     assert_equal "$status" 37 'accepted export changed the child exit status'
     assert_equal "$(cat special.out)" "$(umask)" 'accepted export changed the child mask'
     assert_equal "$(cat child-descriptor)" descriptor 'accepted export changed an inherited descriptor'
+    assert_equal "$(cat child-descriptor-nine)" descriptor-nine 'accepted export changed inherited descriptor 9'
     [ ! -s special.err ] || fail 'accepted export printed unsolicited stderr'
+    # With no descriptor 9 inherited, the saved stderr must not reach the child.
+    "$run_shell" "$ENVY_BIN" run --project shell-special -- \
+        dash -c 'if (printf leaked >&9) 2> /dev/null; then exit 1; fi' \
+        9>&- > special.out 2> special.err
+    [ ! -s special.out ] && [ ! -s special.err ] || fail 'saved stderr descriptor leaked to the child'
 done
 
 # Several aliases are loaded together, overriding only the child's environment.
