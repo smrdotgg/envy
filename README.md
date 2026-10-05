@@ -7,6 +7,37 @@ repository with one command:
 curl -fsSL https://raw.githubusercontent.com/smrdotgg/envy/main/install.sh | sh -s -- <store-url>
 ```
 
+## Threat model
+
+The local age identity is unencrypted at rest. Its owner-only permissions do
+not stop another process running as your user from reading it and decrypting
+every secret. This is the same exposure as a cached cloud login.
+
+A leaked store repository is as strong as its passphrase: someone with a copy
+can try to crack the passphrase protecting the stored identity. Use a strong
+passphrase and keep it safe. Write access to the store repository alone cannot
+read encrypted secret values, but it can change mappings, including which
+secrets a project receives. Treat store writers as trusted.
+
+Secret names, project names, remotes and mapping files, including literal
+values, are plaintext in the store. Only secret values and the identity
+protected by the passphrase are encrypted; do not put secrets in mapping literals.
+
+Ambient mode hands a project's secrets to every process started in that shell,
+including coding agents. To control when they are supplied, use
+`envy config ambient off` for the machine or export `ENVY_AMBIENT=0` for one
+shell, then use `envy run -- your-command arg` to supply them to a chosen
+command and its child processes. Ambient changes unload managed variables at
+the next prompt; they cannot remove copies already inherited by running
+processes. These controls do not prevent same-user access to the local identity.
+
+Narrowly scoped per-project tokens are the real mitigation: limit each token
+to the resources and actions its project needs so a leaked token has limited
+reach. `envy uninstall` does not remove variables from shells that are already
+running; close those shells to discard their environments.
+
+## Installation and use
+
 The installer puts `envy` in `~/.local/bin`, adds a marked block to `~/.bashrc`
 and `~/.zshrc` for each available shell, and runs `envy init` with the store URL.
 Open a new interactive bash or zsh shell to use ambient loading. Each block
