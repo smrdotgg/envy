@@ -1392,12 +1392,14 @@ envy_environment() {
             trap - 0 HUP INT TERM
             envy_refresh_background || :
             umask "$envy_inherited_umask"
-            # Shell-special variables (for example OPTIND) can reject a value
-            # with a fatal diagnostic containing it. Suppress that diagnostic
-            # and report a fixed error even when eval exits the shell directly.
-            trap 'printf "%s\n" "envy: could not export project environment" >&2' 0
+            # Fatal assignments can run the EXIT trap before eval restores
+            # stderr. Save it for the fixed diagnostic, and exit explicitly:
+            # Bash 3.2 otherwise returns the successful printf's status.
+            exec 9>&2
+            trap 'printf "%s\n" "envy: could not export project environment" >&9; exit 1' 0
             eval "$envy_exports" 2> /dev/null
             trap - 0
+            exec 9>&-
             exec "$@"
             ;;
     esac

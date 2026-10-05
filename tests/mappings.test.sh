@@ -103,6 +103,75 @@ fi
 printf '%s\n' 'envy: could not export project environment' > expected-special.err
 cmp expected-special.err special.err || fail 'shell export failure exposed a value or lacked a diagnostic'
 
+# Invoke Bash as sh as well as dash and the system sh (Bash 3.2 on macOS).
+# Observe special variables from Python: a child shell can reset OPTIND itself.
+ln -s "$(command -v bash)" "$HOME/sh"
+# Dash versions differ on nonnumeric OPTIND. Probe the shell independently
+# with a non-secret value, then require envy to respect acceptance or refusal.
+printf '%s\n' 'set -eu' 'export OPTIND=not_numeric' > "$HOME/optind-probe.sh"
+cat > observe-special.py <<'CHILD'
+import os
+import sys
+from pathlib import Path
+
+Path('special-child-ran').touch()
+sys.stdout.write(os.environ[sys.argv[1]])
+CHILD
+printf '7' > numeric-special
+"$ENVY_BIN" set NUMERIC_SPECIAL < numeric-special
+for run_shell in dash /bin/sh "$HOME/sh"; do
+    for special_alias in OPTIND UID PPID SHELLOPTS; do
+        printf 'Good=SECRET\n%s=_SECOND\n' "$special_alias" > "$HOME/map-input"
+        "$ENVY_BIN" project edit shell-special
+        rm -f special-child-ran
+        special_refused=no
+        if [ "$special_alias" = OPTIND ]; then
+            if ! "$run_shell" "$HOME/optind-probe.sh" > /dev/null 2>&1; then
+                special_refused=yes
+            fi
+        elif "$run_shell" -c 'test -n "${BASH_VERSION-}"'; then
+            special_refused=yes
+        fi
+        if [ "$special_refused" = yes ]; then
+            if "$run_shell" "$ENVY_BIN" run --project shell-special -- \
+                python3 observe-special.py "$special_alias" > special.out 2> special.err; then
+                fail "refused shell-special export returned success ($run_shell, $special_alias)"
+            fi
+            [ ! -s special.out ] && [ ! -e special-child-ran ] ||
+                fail 'refused shell-special export launched a child or printed a value'
+            cmp expected-special.err special.err ||
+                fail 'refused shell-special export exposed a value or lacked a diagnostic'
+        else
+            "$run_shell" "$ENVY_BIN" run --project shell-special -- \
+                python3 observe-special.py "$special_alias" > special.out 2> special.err
+            [ -e special-child-ran ] && [ ! -s special.err ] ||
+                fail 'ordinary alias failed to run quietly'
+            cmp replacement special.out || fail 'ordinary alias changed its value'
+        fi
+    done
+    printf 'Good=SECRET\nOPTIND=NUMERIC_SPECIAL\n' > "$HOME/map-input"
+    "$ENVY_BIN" project edit shell-special
+    for accepted_alias in Good OPTIND; do
+        rm -f special-child-ran
+        "$run_shell" "$ENVY_BIN" run --project shell-special -- \
+            python3 observe-special.py "$accepted_alias" > special.out 2> special.err
+        [ -e special-child-ran ] && [ ! -s special.err ] ||
+            fail 'accepted export failed to run quietly'
+        case $accepted_alias in
+            Good) cmp expected special.out || fail 'accepted export changed the secret' ;;
+            OPTIND) cmp numeric-special special.out || fail 'numeric OPTIND changed its value' ;;
+        esac
+    done
+    # Successful runs preserve the child status, mask and inherited descriptors.
+    "$run_shell" "$ENVY_BIN" run --project shell-special -- \
+        dash -c 'umask; printf descriptor >&3; exit 37' \
+        3> child-descriptor > special.out 2> special.err && status=0 || status=$?
+    assert_equal "$status" 37 'accepted export changed the child exit status'
+    assert_equal "$(cat special.out)" "$(umask)" 'accepted export changed the child mask'
+    assert_equal "$(cat child-descriptor)" descriptor 'accepted export changed an inherited descriptor'
+    [ ! -s special.err ] || fail 'accepted export printed unsolicited stderr'
+done
+
 # Several aliases are loaded together, overriding only the child's environment.
 Alias='inherited throwaway value'
 export Alias
