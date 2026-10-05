@@ -13,6 +13,8 @@ run_test() (
     test_sandbox=$(mktemp -d "${TMPDIR:-/tmp}/envy-test.XXXXXX") || exit 1
     trap 'rm -rf "$test_sandbox"' 0
     trap 'exit 1' HUP INT TERM
+    # Match tools that resolve their paths physically (notably on macOS).
+    test_sandbox=$(CDPATH='' cd -- "$test_sandbox" && pwd -P) || exit 1
     umask 077
 
     # Never inherit the engineer's git identity or credentials into fixtures.

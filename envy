@@ -818,8 +818,9 @@ envy_mv() {
 }
 
 envy_project_name() {
+    # Explicit ASCII characters keep validation independent of collation.
     case $1 in
-        ''|[!a-z0-9]*|*[!a-z0-9._-]*)
+        ''|[!abcdefghijklmnopqrstuvwxyz0123456789]*|*[!abcdefghijklmnopqrstuvwxyz0123456789._-]*)
             envy_error 'invalid project name; use [a-z0-9][a-z0-9._-]*'
             ;;
     esac
@@ -1418,8 +1419,9 @@ _envy_unload() {
             *' '*) _ENVY_REMAINING=${_ENVY_REMAINING#* } ;;
             *) _ENVY_REMAINING= ;;
         esac
+        # The hook runs in the caller's locale; use ASCII characters.
         case $_ENVY_ALIAS in
-            ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*|ENVY_*|_ENVY_*) continue ;;
+            ''|[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*|ENVY_*|_ENVY_*) continue ;;
         esac
         if eval '[ "${_ENVY_SAVED_'"$_ENVY_ALIAS"'+x}" = x ]'; then
             eval 'export '"$_ENVY_ALIAS"'="${_ENVY_SAVED_'"$_ENVY_ALIAS"'}"' 2> /dev/null || :

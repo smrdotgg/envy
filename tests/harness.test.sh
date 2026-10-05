@@ -67,3 +67,29 @@ if dash "$TEST_ROOT/tests/run.sh" nonexistent.test.sh > absent.out 2> absent.err
     fail 'missing test succeeded'
 fi
 grep '^FAIL nonexistent.test.sh$' absent.out > /dev/null || fail 'missing test not reported'
+
+# A symlinked TMPDIR must provide the same physical paths and test results.
+cat > canonical.sh <<'TEST'
+#!/bin/sh
+set -eu
+for sandbox_dir in "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" \
+    "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"; do
+    [ "$sandbox_dir" = "$(CDPATH='' cd -- "$sandbox_dir" && pwd -P)" ]
+done
+remote_parent=${TEST_REMOTE%/*}
+[ "$remote_parent" = "$(CDPATH='' cd -- "$remote_parent" && pwd -P)" ]
+TEST
+mkdir physical-temp
+physical_temp=$(CDPATH='' cd physical-temp && pwd -P)
+ln -s "$physical_temp" linked-temp
+for temp_parent in "$physical_temp" "$PWD/linked-temp"; do
+    TMPDIR=$temp_parent dash "$TEST_ROOT/tests/run.sh" canonical.sh \
+        "$TEST_ROOT/tests/self-update.test.sh" > temp-runner.out 2> temp-runner.err || {
+        cat temp-runner.err >&2
+        fail 'runner failed under a physical or symlinked temp directory'
+    }
+    [ ! -s temp-runner.err ] || fail 'temp directory run emitted unexpected errors'
+    grep '^2 tests, 0 failures$' temp-runner.out > /dev/null || fail 'temp directory run changed results'
+    set -- "$physical_temp"/envy-test.*
+    [ ! -e "$1" ] || fail 'runner left a sandbox under the temp directory'
+done
