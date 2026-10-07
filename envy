@@ -995,6 +995,50 @@ envy_directory_project() {
     fi
 }
 
+# Bound the open as well as the read: a regular checkout file can become a FIFO
+# after the type check. No linking is needed across filesystem boundaries.
+envy_snapshot_copy() (
+    envy_reader_pid=
+    envy_watchdog_pid=
+    envy_snapshot_copy_cleanup() {
+        trap '' HUP INT TERM
+        if [ -n "$envy_reader_pid" ]; then
+            kill -KILL "$envy_reader_pid" 2> /dev/null || :
+            wait "$envy_reader_pid" 2> /dev/null || :
+        fi
+        if [ -n "$envy_watchdog_pid" ]; then
+            kill "$envy_watchdog_pid" 2> /dev/null || :
+            wait "$envy_watchdog_pid" 2> /dev/null || :
+        fi
+    }
+    trap 'envy_snapshot_copy_cleanup' 0
+    trap 'exit 1' HUP INT TERM
+    cat "$1" > "$2" 2> /dev/null &
+    envy_reader_pid=$!
+    (
+        envy_timer_pid=
+        trap 'trap "" HUP INT TERM; if [ -n "$envy_timer_pid" ]; then
+            kill "$envy_timer_pid" 2> /dev/null || :
+            wait "$envy_timer_pid" 2> /dev/null || :
+        fi' 0
+        trap 'exit 1' HUP INT TERM
+        # An asynchronous sleep lets cancellation reap the timer immediately.
+        sleep 1 &
+        envy_timer_pid=$!
+        wait "$envy_timer_pid" || exit 1
+        envy_timer_pid=
+        : > "$envy_temp/snapshot-timeout"
+        kill -KILL "$envy_reader_pid" 2> /dev/null || :
+    ) &
+    envy_watchdog_pid=$!
+    envy_read_status=0
+    wait "$envy_reader_pid" 2> /dev/null || envy_read_status=1
+    envy_reader_pid=
+    envy_snapshot_copy_cleanup
+    envy_watchdog_pid=
+    [ "$envy_read_status" -eq 0 ] && [ ! -e "$envy_temp/snapshot-timeout" ] && [ -f "$1" ]
+)
+
 # Hash and parse the same private snapshot, even if the checkout changes while
 # the command runs. Git hashes stdin without applying repository clean filters.
 envy_snapshot_project() {
@@ -1007,7 +1051,7 @@ envy_snapshot_project() {
         printf 'envy: %s: mapping is not a regular file\n' "$envy_inproject" >&2
         return 1
     fi
-    if ! cat "$envy_inproject" > "$envy_temp/in-project"; then
+    if ! envy_snapshot_copy "$envy_inproject" "$envy_temp/in-project"; then
         printf 'envy: %s: cannot read mapping\n' "$envy_inproject" >&2
         return 1
     fi
