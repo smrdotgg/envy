@@ -1538,17 +1538,27 @@ envy_hook_resolve() (
     envy_selected_project=
     envy_directory_project
     envy_environment_snapshot
+    envy_environment_table || exit 1
     envy_revision=$(git -C "$envy_store" rev-parse HEAD) || envy_error 'cannot read store revision'
     envy_fingerprint=$(
         printf '%s\n' "$envy_root" "$envy_selected_project" "$envy_revision" "${envy_inproject_hash-}" "$envy_ambient"
         for envy_map in "$envy_store/global" "$envy_store/projects/$envy_selected_project/map"; do
             [ ! -e "$envy_map" ] || git hash-object --stdin < "$envy_map" || exit 1
         done
-    ) || envy_error 'cannot fingerprint mappings'
+        # Hash only winning secret references, once each, without decrypting or
+        # applying Git clean filters. Same-HEAD ciphertext edits must invalidate
+        # the cache just as working-tree mapping edits do.
+        LC_ALL=C awk -F '\t' '$2 == "secret" { print substr($3, 2, length($3) - 2) }' \
+            "$envy_temp/table" > "$envy_temp/unsorted-references" || exit 1
+        LC_ALL=C sort -u "$envy_temp/unsorted-references" > "$envy_temp/references" || exit 1
+        while IFS= read -r envy_secret; do
+            printf '%s\n' "$envy_secret"
+            git hash-object --stdin < "$envy_store/secrets/$envy_secret.age" || exit 1
+        done < "$envy_temp/references"
+    ) || envy_error 'cannot fingerprint environment files'
     envy_fingerprint=$(printf '%s\n' "$envy_fingerprint" | git hash-object --stdin) ||
         envy_error 'cannot fingerprint environment'
     [ "$envy_fingerprint" != "${_ENVY_FP-}" ] || exit 0
-    envy_environment_table || exit 1
     envy_environment_exports || exit 1
     printf '%s\n' '_envy_unload'
     envy_vars=

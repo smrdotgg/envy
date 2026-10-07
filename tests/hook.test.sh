@@ -49,7 +49,7 @@ mkdir "$HOME/bin"
 ln -s "$ENVY_BIN" "$HOME/bin/envy"
 cat > "$HOME/bin/age" <<'AGE'
 #!/bin/sh
-printf 'decrypt\n' >> "$HOME/age-calls"
+[ "${1-}" != -d ] || printf 'decrypt\n' >> "$HOME/age-calls"
 exec "$real_age" "$@"
 AGE
 chmod +x "$HOME/bin/age"
@@ -246,6 +246,122 @@ for shell in bash zsh; do
     [ ! -s "$HOME/session.out" ] && [ ! -s "$HOME/session.err" ] || fail 'hook session emitted unexpected output'
     grep -F 'quotes' "$HOME/all-notices" > /dev/null && fail 'hook error disclosed a multiline value'
     grep -F 'second project credential' "$HOME/all-notices" > /dev/null && fail 'hook error disclosed a value'
+done
+
+# Same-HEAD mutations across all three layers, through the registered command
+# wrapper and child environments. The overwritten reference must not invalidate
+# the cache, nor may a secret used only by another project.
+printf 'local credential\n' > "$HOME/local-value"
+"$ENVY_BIN" set THIRD < "$HOME/local-value"
+printf 'unused credential\n' | "$ENVY_BIN" set UNUSED
+printf 'CacheGlobal=FIRST\n' > "$HOME/map-input"
+"$ENVY_BIN" project edit --global
+printf 'CacheCentral=SECOND\nCacheLiteral=UNUSED\n' > "$HOME/map-input"
+"$ENVY_BIN" project edit cache
+mkdir -p "$HOME/cache/deep"
+(cd "$HOME/cache" && "$ENVY_BIN" link --local cache)
+printf 'CacheLocal=THIRD\nCacheLiteral=__literal__("fixed")\n' > "$HOME/cache/.envy"
+(cd "$HOME/cache" && "$ENVY_BIN" allow > /dev/null)
+printf 'replacement credential\n\n' > "$HOME/replacement-value"
+"$ENVY_BIN" get SECOND > "$HOME/central-value"
+"$real_age" -a -R "$store/recipient" -o "$HOME/replacement-ciphertext" < "$HOME/replacement-value"
+for name in FIRST SECOND THIRD EMPTY UNUSED; do
+    cp "$store/secrets/$name.age" "$HOME/original-$name.age"
+done
+
+cat > "$HOME/ciphertext-session" <<'SESSION'
+set -eu
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+store=$XDG_DATA_HOME/envy/store
+head=$(git -C "$store" rev-parse HEAD)
+evaluate() {
+    envy version > /dev/null
+    _envy_hook 2> "$HOME/ciphertext-notice"
+    cat "$HOME/ciphertext-notice" >> "$HOME/ciphertext-notices"
+    [ "$(git -C "$store" rev-parse HEAD)" = "$head" ] || fail 'ciphertext test changed HEAD'
+}
+loaded() {
+    sh -c 'printf "%s" "$CacheGlobal"' > "$HOME/cache-global"
+    sh -c 'printf "%s" "$CacheCentral"' > "$HOME/cache-central"
+    sh -c 'printf "%s" "$CacheLocal"' > "$HOME/cache-local"
+    sh -c '[ "$CacheLiteral" = fixed ]' || fail 'literal override changed'
+    cmp -s "$HOME/expected-value" "$HOME/cache-global" || fail 'global value changed'
+    cmp -s "$HOME/central-value" "$HOME/cache-central" || fail 'central value changed'
+    cmp -s "$HOME/local-value" "$HOME/cache-local" || fail 'local value changed'
+}
+cd "$HOME/cache"
+eval "$(envy hook)"
+evaluate
+loaded
+calls=$(wc -l < "$HOME/age-calls")
+
+# EMPTY is used by another project; UNUSED is overridden by the approved layer.
+cp "$HOME/replacement-ciphertext" "$store/secrets/EMPTY.age"
+printf 'invalid ciphertext\n' > "$store/secrets/UNUSED.age"
+evaluate
+[ ! -s "$HOME/ciphertext-notice" ] || fail 'unreferenced change caused a reload'
+[ "$(wc -l < "$HOME/age-calls")" = "$calls" ] || fail 'unreferenced change decrypted secrets'
+loaded
+
+# Corrupt the last decrypted layer after earlier values were buffered. Every
+# managed variable must be absent from a child, and the error is one fixed line
+# alongside the normal unload notice. Repeated failures cannot retain values.
+printf 'invalid ciphertext\n' > "$store/secrets/THIRD.age"
+for attempt in 1 2; do
+    evaluate
+    sh -c '[ "${CacheGlobal+x}${CacheCentral+x}${CacheLocal+x}${CacheLiteral+x}" = "" ]' ||
+        fail 'same-HEAD corruption retained a managed variable'
+    [ "$(grep -c '^envy: could not decrypt secret: THIRD$' "$HOME/ciphertext-notice")" = 1 ] ||
+        fail 'same-HEAD corruption lacks one decryption error'
+    [ "$(wc -l < "$HOME/ciphertext-notice" | tr -d ' ')" = "$((3 - attempt))" ] ||
+        fail 'same-HEAD corruption emitted extra diagnostics'
+done
+cp "$HOME/original-THIRD.age" "$store/secrets/THIRD.age"
+evaluate
+loaded
+grep '^envy: loaded 4 vars$' "$HOME/ciphertext-notice" > /dev/null || fail 'repair did not reload'
+
+# Valid replacements in global, central and approved in-project references are
+# detected without commits or approval changes; restore each before the next.
+for pair in FIRST:CacheGlobal SECOND:CacheCentral THIRD:CacheLocal; do
+    name=${pair%%:*}
+    alias=${pair#*:}
+    cp "$HOME/replacement-ciphertext" "$store/secrets/$name.age"
+    evaluate
+    sh -c 'eval "printf \"%s\" \"\${$1}\""' sh "$alias" > "$HOME/cache-replacement"
+    cmp -s "$HOME/replacement-value" "$HOME/cache-replacement" || fail 'valid same-HEAD replacement did not load'
+    grep '^envy: loaded 4 vars$' "$HOME/ciphertext-notice" > /dev/null || fail 'replacement did not reload'
+    cp "$HOME/original-$name.age" "$store/secrets/$name.age"
+    evaluate
+    loaded
+done
+calls=$(wc -l < "$HOME/age-calls")
+cd deep
+_envy_hook 2> "$HOME/ciphertext-notice"
+[ ! -s "$HOME/ciphertext-notice" ] || fail 'repaired fingerprint hit emitted a notice'
+[ "$(wc -l < "$HOME/age-calls")" = "$calls" ] || fail 'repaired fingerprint hit decrypted secrets'
+SESSION
+
+for shell in bash zsh; do
+    for name in FIRST SECOND THIRD EMPTY UNUSED; do
+        cp "$HOME/original-$name.age" "$store/secrets/$name.age"
+    done
+    : > "$HOME/age-calls"
+    : > "$HOME/ciphertext-notices"
+    case $shell in
+        bash) set -- bash --noprofile --norc ;;
+        zsh) set -- zsh -f ;;
+    esac
+    "$@" "$HOME/ciphertext-session" > "$HOME/ciphertext.out" 2> "$HOME/ciphertext.err" || {
+        cat "$HOME/ciphertext.err" >&2
+        fail 'same-HEAD ciphertext session failed'
+    }
+    [ ! -s "$HOME/ciphertext.out" ] && [ ! -s "$HOME/ciphertext.err" ] || fail 'ciphertext session emitted unexpected output'
+    for marker in quotes credential; do
+        if grep -F "$marker" "$HOME/ciphertext-notices" > /dev/null; then
+            fail 'same-HEAD diagnostic disclosed a secret value'
+        fi
+    done
 done
 
 for command in hook hook-env; do
