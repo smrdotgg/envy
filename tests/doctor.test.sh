@@ -39,12 +39,13 @@ before_fetch=$(cat "$XDG_STATE_HOME/envy/last-fetch")
 before_key=$(git hash-object "$identity")
 doctor_ok
 for check in 'dependency git:' 'dependency age:' 'dependency age-keygen:' \
-    'store format' 'identity matches store' 'store cleanliness' 'remote reachable' \
+    'store format' 'store layout' 'identity matches store' 'store cleanliness' 'remote reachable' \
     'hook bash' 'hook zsh' 'PATH resolves this envy executable' \
     'permissions executable' 'permissions identity' 'permissions data' \
     'permissions store' 'permissions state' 'permissions config' 'permissions settings'; do
     shows "PASS $check"
 done
+assert_equal "$(grep -c '^PASS ' doctor.out)" 20 'healthy doctor should add exactly one layout check'
 assert_equal "$(git -C "$store" rev-parse HEAD)" "$before_head" 'doctor changed store history'
 assert_equal "$(cat "$XDG_STATE_HOME/envy/last-fetch")" "$before_fetch" 'doctor fetched'
 assert_equal "$(git hash-object "$identity")" "$before_key" 'doctor changed identity'
@@ -137,6 +138,64 @@ rm isolated/age-keygen
 PATH=$PWD/isolated doctor_bad
 shows 'FAIL dependency age-keygen: missing'
 shows 'FAIL identity:'
+
+# A clean store without its encrypted identity is unhealthy, but cached reads
+# still work. Both diagnostic commands must leave the deliberate fault intact.
+printf 'DoctorToken=TOKEN\n' > "$store/global"
+git -C "$store" add global
+git -C "$store" commit -qm 'add doctor mapping fixture'
+git -C "$store" rm -q identity.age
+git -C "$store" commit -qm 'remove encrypted identity fixture'
+git -C "$store" push -q
+layout_head=$(git -C "$store" rev-parse HEAD)
+layout_key=$(git hash-object "$identity")
+doctor_bad
+shows 'FAIL store layout: identity.age is missing; restore it from history or a known-good machine'
+shows 'PASS store cleanliness'
+shows 'PASS identity matches store'
+assert_equal "$(grep -c '^FAIL ' doctor.out)" 1 'missing encrypted identity should fail only the layout check'
+"$installed" get TOKEN > cached-get
+cmp value cached-get || fail 'incomplete layout broke get with a cached key'
+"$installed" env > cached-env
+(eval "$(cat cached-env)"; printf '%s' "$DoctorToken" > cached-env-value)
+cmp value cached-env-value || fail 'incomplete layout broke env with a cached key'
+"$installed" run -- sh -c 'printf "%s" "$DoctorToken"' > cached-run
+cmp value cached-run || fail 'incomplete layout broke run with a cached key'
+for shell in bash zsh; do
+    "$shell" -c 'eval "$(envy hook)"; _envy_hook; printf "%s" "$DoctorToken"' > cached-hook
+    cmp value cached-hook || fail 'incomplete layout broke hook with a cached key'
+done
+assert_equal "$(git -C "$store" rev-parse HEAD)" "$layout_head" 'layout diagnostics or reads changed history'
+assert_equal "$(git hash-object "$identity")" "$layout_key" 'layout diagnostics or reads changed cached key'
+[ ! -e "$store/identity.age" ] || fail 'layout diagnostics recreated encrypted identity'
+git -C "$store" checkout HEAD^ -- identity.age
+git -C "$store" commit -qm 'restore encrypted identity fixture'
+git -C "$store" push -q
+
+# Check both required files for every layout fault, without reading their
+# contents into diagnostics. Symlinks are not regular store files either.
+for layout_file in identity.age recipient; do
+    cp "$store/$layout_file" saved-layout-file
+    for layout_fault in missing directory untracked symlink; do
+        case $layout_fault in
+            missing) rm "$store/$layout_file"; layout_reason='is missing' ;;
+            directory) rm "$store/$layout_file"; mkdir "$store/$layout_file"; layout_reason='is not a regular file' ;;
+            untracked) git -C "$store" rm --cached -q "$layout_file"; layout_reason='is untracked' ;;
+            symlink) rm "$store/$layout_file"; ln -s "$PWD/saved-layout-file" "$store/$layout_file"; layout_reason='is not a regular file' ;;
+        esac
+        layout_head=$(git -C "$store" rev-parse HEAD)
+        git -C "$store" diff --binary HEAD > layout-before
+        doctor_bad
+        shows "FAIL store layout: $layout_file $layout_reason; restore it from history or a known-good machine"
+        assert_equal "$(git -C "$store" rev-parse HEAD)" "$layout_head" 'layout failure changed HEAD'
+        assert_equal "$(git hash-object "$identity")" "$layout_key" 'layout failure changed local key'
+        git -C "$store" diff --binary HEAD > layout-after
+        cmp layout-before layout-after || fail 'layout failure changed store files or index'
+        if [ "$layout_fault" = directory ]; then rmdir "$store/$layout_file"; fi
+        git -C "$store" checkout HEAD -- "$layout_file"
+    done
+done
+doctor_ok
 
 # Missing/corrupt keys, newer formats and unfinished operations are failures.
 mv "$identity" saved-current-identity

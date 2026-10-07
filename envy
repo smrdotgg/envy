@@ -239,6 +239,25 @@ envy_validate_store() (
     esac
 )
 
+# Read paths stay usable with a cached key when recovery metadata is damaged.
+# Only readiness diagnostics require these regular, tracked store files.
+# Keep this check and its recovery wording in sync with install_store_layout.
+envy_validate_store_layout() (
+    for envy_layout_file in identity.age recipient; do
+        envy_layout_reason=
+        if [ ! -e "$1/$envy_layout_file" ] && [ ! -L "$1/$envy_layout_file" ]; then
+            envy_layout_reason='is missing'
+        elif [ ! -f "$1/$envy_layout_file" ] || [ -L "$1/$envy_layout_file" ]; then
+            envy_layout_reason='is not a regular file'
+        elif ! git -C "$1" ls-files --error-unmatch -- "$envy_layout_file" > /dev/null 2>&1; then
+            envy_layout_reason='is untracked'
+        fi
+        if [ -n "$envy_layout_reason" ]; then
+            envy_error "store layout: $envy_layout_file $envy_layout_reason; restore it from history or a known-good machine"
+        fi
+    done
+)
+
 envy_check_identity() (
     [ -f "$2" ] || envy_error 'local identity missing; run envy unlock'
     envy_public=$(age-keygen -y "$2" 2> /dev/null) ||
@@ -1835,6 +1854,11 @@ envy_doctor() {
         envy_doctor_line pass 'store format'
     else
         envy_doctor_line fail 'store format: initialize or update envy'
+    fi
+    if envy_layout_diagnosis=$(envy_validate_store_layout "$envy_store" 2>&1); then
+        envy_doctor_line pass 'store layout'
+    else
+        envy_doctor_line fail "${envy_layout_diagnosis#envy: }"
     fi
     if envy_check_identity "$envy_store" "$envy_identity" > /dev/null 2>&1; then
         envy_doctor_line pass 'identity matches store'

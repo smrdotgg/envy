@@ -6,6 +6,23 @@ install_error() {
     exit 1
 }
 
+# Standalone preflight; keep in sync with envy_validate_store_layout.
+install_store_layout() (
+    for install_layout_file in identity.age recipient; do
+        install_layout_reason=
+        if [ ! -e "$1/$install_layout_file" ] && [ ! -L "$1/$install_layout_file" ]; then
+            install_layout_reason='is missing'
+        elif [ ! -f "$1/$install_layout_file" ] || [ -L "$1/$install_layout_file" ]; then
+            install_layout_reason='is not a regular file'
+        elif ! git -C "$1" ls-files --error-unmatch -- "$install_layout_file" > /dev/null 2>&1; then
+            install_layout_reason='is untracked'
+        fi
+        if [ -n "$install_layout_reason" ]; then
+            install_error "store layout: $install_layout_file $install_layout_reason; restore it from history or a known-good machine"
+        fi
+    done
+)
+
 install_confirm() (
     # stdin may contain the installer itself; only the terminal owns answers.
     exec 3<> /dev/tty
@@ -116,6 +133,33 @@ done
 
 [ -n "${HOME-}" ] || install_error 'HOME must be set'
 command -v git > /dev/null 2>&1 || install_error 'missing dependency: git; install git and re-run'
+# Refuse invalid existing state before installing dependencies or changing any
+# executable/startup file. A fresh store is still initialized after installation.
+install_existing=no
+if [ -n "$install_url" ]; then
+    install_store=${XDG_DATA_HOME:-$HOME/.local/share}/envy/store
+    install_identity=${XDG_DATA_HOME:-$HOME/.local/share}/envy/identity
+    if [ -e "$install_store" ] || [ -L "$install_store" ] ||
+        [ -e "$install_identity" ] || [ -L "$install_identity" ]; then
+        install_existing=yes
+        [ -d "$install_store/.git" ] ||
+            install_error 'existing local state is incomplete; recover it with envy init or envy unlock'
+        install_origin=$(git -C "$install_store" config --local --get remote.origin.url 2> /dev/null) ||
+            install_error 'existing local state is incomplete; recover it with envy init or envy unlock'
+        # Git records an absolute origin for a relative local clone. Compare
+        # existing local directories by physical path, including symlink aliases.
+        if [ "$install_origin" != "$install_url" ] &&
+            [ -d "$install_origin" ] && [ -d "$install_url" ]; then
+            install_origin=$(CDPATH='' cd -- "$install_origin" && pwd -P) ||
+                install_error 'cannot resolve existing local store URL'
+            install_url=$(CDPATH='' cd -- "$install_url" && pwd -P) ||
+                install_error 'cannot resolve local store URL'
+        fi
+        [ "$install_origin" = "$install_url" ] || install_error 'machine already uses a different store URL'
+        install_store_layout "$install_store" || exit 1
+        [ -f "$install_identity" ] || install_error 'local identity missing; run envy unlock'
+    fi
+fi
 install_age
 
 install_dir=$HOME/.local/bin
@@ -163,6 +207,11 @@ LC_ALL=C awk '
         print version
     }
 ' "$install_temp/envy" > /dev/null || install_error 'downloaded file is not an envy script'
+if [ "$install_existing" = yes ]; then
+    # The validated candidate checks format and cached key without decrypting,
+    # fetching or requiring an intact previously installed executable.
+    sh "$install_temp/envy" ls > /dev/null < /dev/null || exit 1
+fi
 if [ -d "$install_dir/envy" ]; then
     install_error 'envy install path is a directory'
 fi
@@ -174,26 +223,7 @@ fi
 if command -v bash > /dev/null 2>&1; then install_hook "$HOME/.bashrc"; fi
 if command -v zsh > /dev/null 2>&1; then install_hook "$HOME/.zshrc"; fi
 
-if [ -n "$install_url" ]; then
-    install_store=${XDG_DATA_HOME:-$HOME/.local/share}/envy/store
-    install_identity=${XDG_DATA_HOME:-$HOME/.local/share}/envy/identity
-    if [ -e "$install_store" ] || [ -e "$install_identity" ]; then
-        install_origin=$(git -C "$install_store" config --get remote.origin.url 2> /dev/null) ||
-            install_error 'existing local state is incomplete; recover it with envy init or envy unlock'
-        # Git records an absolute origin for a relative local clone. Compare
-        # existing local directories by physical path, including symlink aliases.
-        if [ "$install_origin" != "$install_url" ] &&
-            [ -d "$install_origin" ] && [ -d "$install_url" ]; then
-            install_origin=$(CDPATH='' cd -- "$install_origin" && pwd -P) ||
-                install_error 'cannot resolve existing local store URL'
-            install_url=$(CDPATH='' cd -- "$install_url" && pwd -P) ||
-                install_error 'cannot resolve local store URL'
-        fi
-        [ "$install_origin" = "$install_url" ] || install_error 'machine already uses a different store URL'
-        # ls validates the format and identity without decrypting or fetching.
-        "$install_dir/envy" ls > /dev/null < /dev/null || exit 1
-    else
-        "$install_dir/envy" init "$install_url" < /dev/null
-    fi
+if [ -n "$install_url" ] && [ "$install_existing" = no ]; then
+    "$install_dir/envy" init "$install_url" < /dev/null
 fi
 printf '%s\n' 'envy installed; open a new bash or zsh shell to load the hook.'

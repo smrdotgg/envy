@@ -184,17 +184,74 @@ snapshot > joined.after
 cmp joined.before joined.after || fail 'joined machine rerun changed state'
 
 # An unrelated store or incomplete identity must never be silently overwritten.
-if dash "$TEST_ROOT/install.sh" "$homes/other.git" < /dev/null > different.out 2> different.err; then
-    fail 'installer accepted a different store URL'
-fi
-grep 'different store URL' different.err > /dev/null || fail 'different store not diagnosed'
+store=$XDG_DATA_HOME/envy/store
+identity=$XDG_DATA_HOME/envy/identity
+cp "$HOME/.local/bin/envy" saved-executable
+cp "$HOME/.bashrc" saved-bashrc
+cp "$HOME/.zshrc" saved-zshrc
+# Force observable repair work if the installer gets past its refusal checks.
+printf '\n# previous installation fixture\n' >> "$HOME/.local/bin/envy"
+printf 'export KEEP_STARTUP=yes\n' > "$HOME/.bashrc"
+printf 'export KEEP_STARTUP=yes\n' > "$HOME/.zshrc"
+refuse_state() {
+    snapshot > refusal.before
+    if dash "$TEST_ROOT/install.sh" "$2" < /dev/null > refusal.out 2> refusal.err; then
+        fail 'installer accepted invalid existing local state'
+    fi
+    grep -F "$1" refusal.err > /dev/null || fail 'installer omitted expected recovery diagnosis'
+    snapshot > refusal.after
+    cmp refusal.before refusal.after || fail 'installer refusal changed executable, startup files, key or store'
+    cat refusal.out refusal.err >> refusal-log
+}
+refuse_state 'different store URL' "$homes/other.git"
 mv "$XDG_DATA_HOME/envy/identity" saved-identity
-if dash "$TEST_ROOT/install.sh" "$TEST_REMOTE" < /dev/null > missing.out 2> missing.err; then
-    fail 'installer accepted a missing identity'
-fi
-grep 'envy unlock' missing.err > /dev/null || fail 'missing identity lacks recovery instructions'
+refuse_state 'envy unlock' "$TEST_REMOTE"
 [ ! -e "$XDG_DATA_HOME/envy/identity" ] || fail 'rerun recreated a key or prompted'
 mv saved-identity "$XDG_DATA_HOME/envy/identity"
+mv "$store" saved-store
+refuse_state 'existing local state is incomplete' "$TEST_REMOTE"
+mv saved-store "$store"
+printf '2\n' > "$store/format"
+refuse_state 'unsupported store format' "$TEST_REMOTE"
+git -C "$store" checkout -- format
+
+# Reproduce the clean missing-identity store; the refusal must match doctor
+# and preserve the local identity, history and every installation file.
+git -C "$store" rm -q identity.age
+git -C "$store" commit -qm 'remove encrypted identity fixture'
+git -C "$store" push -q
+refuse_state 'store layout: identity.age is missing; restore it from history or a known-good machine' "$TEST_REMOTE"
+printf '%s\n' 'envy installer: store layout: identity.age is missing; restore it from history or a known-good machine' > layout.expected
+cmp layout.expected refusal.err || fail 'installer missing-identity diagnosis differs'
+[ ! -s refusal.out ] || fail 'refused incomplete store reported success'
+"$ENVY_BIN" doctor > layout-doctor.out 2> layout-doctor.err && fail 'doctor accepted incomplete installer store'
+grep '^FAIL store layout: identity.age is missing; restore it from history or a known-good machine$' layout-doctor.out > /dev/null || fail 'doctor and installer layout diagnoses differ'
+git -C "$store" checkout HEAD^ -- identity.age
+git -C "$store" commit -qm 'restore encrypted identity fixture'
+git -C "$store" push -q
+
+for layout_file in identity.age recipient; do
+    cp "$store/$layout_file" saved-layout-file
+    for layout_fault in missing directory untracked symlink; do
+        case $layout_fault in
+            missing) rm "$store/$layout_file"; layout_reason='is missing' ;;
+            directory) rm "$store/$layout_file"; mkdir "$store/$layout_file"; layout_reason='is not a regular file' ;;
+            untracked) git -C "$store" rm --cached -q "$layout_file"; layout_reason='is untracked' ;;
+            symlink) rm "$store/$layout_file"; ln -s "$PWD/saved-layout-file" "$store/$layout_file"; layout_reason='is not a regular file' ;;
+        esac
+        refuse_state "store layout: $layout_file $layout_reason; restore it from history or a known-good machine" "$TEST_REMOTE"
+        if [ "$layout_fault" = directory ]; then rmdir "$store/$layout_file"; fi
+        git -C "$store" checkout HEAD -- "$layout_file"
+    done
+done
+cp saved-executable "$HOME/.local/bin/envy"
+cp saved-bashrc "$HOME/.bashrc"
+cp saved-zshrc "$HOME/.zshrc"
+python3 - <<'PY'
+from pathlib import Path
+assert Path('expected-value').read_bytes() not in Path('refusal-log').read_bytes()
+assert b'AGE-SECRET-KEY-' not in Path('refusal-log').read_bytes()
+PY
 
 # Download source override uses curl without reaching the network.
 mkdir "$HOME/stubs"
