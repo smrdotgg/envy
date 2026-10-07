@@ -1518,14 +1518,37 @@ _envy_unload() {
             ''|[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*|ENVY_*|_ENVY_*) continue ;;
         esac
         if eval '[ "${_ENVY_SAVED_'"$_ENVY_ALIAS"'+x}" = x ]'; then
-            eval 'export '"$_ENVY_ALIAS"'="${_ENVY_SAVED_'"$_ENVY_ALIAS"'}"' 2> /dev/null || :
-            unset "_ENVY_SAVED_$_ENVY_ALIAS"
+            # Unset first to clear the project's export attribute in both shells.
+            # Eval catches zsh's readonly-unset error without exiting the shell.
+            if eval 'unset "$_ENVY_ALIAS"' 2> /dev/null; then
+                eval "$_ENVY_ALIAS"'="${_ENVY_SAVED_'"$_ENVY_ALIAS"'}"' 2> /dev/null || :
+                if eval '[ "${_ENVY_EXPORTED_'"$_ENVY_ALIAS"'-0}" = 1 ]'; then
+                    export "$_ENVY_ALIAS" 2> /dev/null || :
+                fi
+            fi
+            unset "_ENVY_SAVED_$_ENVY_ALIAS" "_ENVY_EXPORTED_$_ENVY_ALIAS"
         else
             unset "$_ENVY_ALIAS"
         fi
         _ENVY_UNLOAD_COUNT=$((_ENVY_UNLOAD_COUNT + 1))
     done
     unset _ENVY_VARS
+}
+_envy_save() {
+    _ENVY_ALIAS=$1
+    if eval '[ "${'"$_ENVY_ALIAS"'+x}" = x ]'; then
+        # Keep private originals in the parent shell, including their export
+        # state. Bash 3.2 prints declare -x (possibly combined with other flags);
+        # zsh prints export. Inspect only the header, never the value's text.
+        eval '_ENVY_SAVED_'"$_ENVY_ALIAS"'="${'"$_ENVY_ALIAS"'}"'
+        _ENVY_DECLARATION=$(typeset -p "$_ENVY_ALIAS" 2> /dev/null)
+        _ENVY_DECLARATION=${_ENVY_DECLARATION%%=*}
+        case $_ENVY_DECLARATION in
+            export\ *|declare\ -*x*\ *) eval '_ENVY_EXPORTED_'"$_ENVY_ALIAS"'=1' ;;
+            *) eval '_ENVY_EXPORTED_'"$_ENVY_ALIAS"'=0' ;;
+        esac
+        unset _ENVY_DECLARATION
+    fi
 }
 _envy_hook() {
     _ENVY_STATUS=$?
@@ -1610,8 +1633,7 @@ envy_hook_resolve() (
     while IFS="$(printf '\t')" read -r envy_alias envy_kind envy_value; do
         # Capture originals in the parent shell, where even unexported values
         # are visible. Identifier validation happens in the mapping resolver.
-        printf "if [ \"\${%s+x}\" = x ]; then export _ENVY_SAVED_%s=\"\$%s\"; fi\n" \
-            "$envy_alias" "$envy_alias" "$envy_alias"
+        printf '_envy_save %s\n' "$envy_alias"
         envy_vars=${envy_vars:+$envy_vars }$envy_alias
         envy_count=$((envy_count + 1))
     done < "$envy_temp/table"

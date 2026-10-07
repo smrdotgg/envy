@@ -135,6 +135,7 @@ _envy_hook 2> "$HOME/notice"
 cd "$HOME/outside" || exit 1
 _envy_hook 2> "$HOME/notice"
 [ "$Original" = 'private original' ] || fail 'unexported original was lost'
+sh -c '[ "${Original+x}" != x ]' || fail 'unexported original became exported'
 # A CLI command invalidates the prompt's directory cache, including a failed one.
 cd "$HOME/untrusted" || exit 1
 _envy_hook 2> "$HOME/notice"
@@ -206,6 +207,81 @@ notice 2 'envy: could not export project environment'
 envy project edit --global || fail 'global cleanup failed'
 SESSION
 
+cat > "$HOME/export-session" <<'SESSION'
+set -eu
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+# Observe declaration inspection through the shell builtin, without exposing
+# values. A fingerprint hit must not inspect attributes or add load work.
+typeset() {
+    [ "${1-}" != -p ] || printf 'inspect\n' >> "$HOME/declaration-calls"
+    builtin typeset "$@"
+}
+loaded() {
+    sh -c 'printf "%s" "$Original"' > "$HOME/export-observed"
+    cmp -s "$HOME/$1" "$HOME/export-observed" || fail 'project alias is not exported with its exact value'
+}
+restored() {
+    case $original_state in
+        private|empty)
+            [ "${Original+x}" = x ] && [ "$Original" = "$original_value" ] || fail 'private original value changed'
+            sh -c '[ "${Original+x}" != x ]' || fail 'private original became exported'
+            ;;
+        exported)
+            [ "$Original" = "$original_value" ] || fail 'exported original value changed'
+            sh -c 'printf "%s" "$Original"' > "$HOME/export-observed"
+            cmp -s "$HOME/expected-value" "$HOME/export-observed" || fail 'exported original lost its export state or bytes'
+            ;;
+        unset)
+            [ "${Original+x}" != x ] || fail 'unset original became set'
+            sh -c '[ "${Original+x}" != x ]' || fail 'unset original remained exported'
+            ;;
+    esac
+}
+cd "$HOME/outside"
+eval "$(envy hook)"
+for original_state in private empty exported unset; do
+    unset Original
+    case $original_state in
+        private|exported)
+            Original=$(cat "$HOME/expected-value"; printf '.')
+            Original=${Original%.}
+            ;;
+        empty) Original='' ;;
+    esac
+    [ "$original_state" != exported ] || export Original
+    original_value=${Original-}
+    for transition in leave swap override config; do
+        cd "$HOME/first"
+        _envy_hook 2> "$HOME/export-notice"
+        loaded expected-value
+        calls=$(wc -l < "$HOME/declaration-calls")
+        cd deep/sub
+        _envy_hook 2> "$HOME/export-notice"
+        [ ! -s "$HOME/export-notice" ] || fail 'subdirectory transition reloaded aliases'
+        [ "$(wc -l < "$HOME/declaration-calls")" = "$calls" ] || fail 'subdirectory transition inspected export state'
+        case $transition in
+            leave) cd "$HOME/outside" ;;
+            swap)
+                cd "$HOME/second"
+                _envy_hook 2> "$HOME/export-notice"
+                loaded second-value
+                cd "$HOME/outside"
+                ;;
+            override) ENVY_AMBIENT=0 ;;
+            config) envy config ambient off ;;
+        esac
+        _envy_hook 2> "$HOME/export-notice"
+        restored
+        # Re-enable outside the project so each round starts unloaded.
+        cd "$HOME/outside"
+        unset ENVY_AMBIENT
+        envy config ambient on
+        _envy_hook 2> "$HOME/export-notice"
+        restored
+    done
+done
+SESSION
+
 cat > "$HOME/typed-session" <<'SESSION'
 cd "$HOME/outside" || exit 1
 typeset -i Original=7
@@ -222,6 +298,7 @@ SESSION
 
 cp "$store/projects/first/map" "$HOME/first-map"
 cp "$store/secrets/SECOND.age" "$HOME/second-ciphertext"
+"$ENVY_BIN" get SECOND > "$HOME/second-value"
 cp "$XDG_DATA_HOME/envy/identity" "$HOME/identity-backup"
 for shell in bash zsh; do
     command -v "$shell" > /dev/null || fail 'hook test requires bash and zsh'
@@ -236,6 +313,20 @@ for shell in bash zsh; do
         bash) set -- bash --noprofile --norc ;;
         zsh) set -- zsh -f ;;
     esac
+    : > "$HOME/declaration-calls"
+    "$@" "$HOME/export-session" > "$HOME/export.out" 2> "$HOME/export.err" || {
+        cat "$HOME/export.err" >&2
+        fail 'hook export-state session failed'
+    }
+    [ ! -s "$HOME/export.out" ] && [ ! -s "$HOME/export.err" ] || fail 'export-state session emitted unexpected output'
+    # macOS ships Bash 3.2; exercise it even if PATH selects Homebrew bash.
+    if [ "$shell" = bash ] && [ "$(command -v bash)" != /bin/bash ]; then
+        /bin/bash --noprofile --norc "$HOME/export-session" > "$HOME/export.out" 2> "$HOME/export.err" || {
+            cat "$HOME/export.err" >&2
+            fail 'system bash export-state session failed'
+        }
+        [ ! -s "$HOME/export.out" ] && [ ! -s "$HOME/export.err" ] || fail 'system bash session emitted unexpected output'
+    fi
     "$@" "$HOME/typed-session" > "$HOME/typed.out" 2> "$HOME/typed.err" ||
         fail 'hook did not load exact text over an integer variable and restore its original value'
     [ ! -s "$HOME/typed.out" ] && [ ! -s "$HOME/typed.err" ] || fail 'typed hook session emitted unexpected output'

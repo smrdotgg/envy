@@ -288,8 +288,10 @@ eval "$(envy hook)"
 ```
 
 At the next prompt, entering a project loads its layered environment. Leaving
-restores pre-existing values and unsets other managed variables; moving to
-another project swaps the environment. Global mappings apply outside projects
+restores pre-existing values and their export state and unsets other managed
+variables. Integer, array and readonly attributes are not restored; a readonly
+alias can prevent loading. Moving to another project swaps the environment.
+Global mappings apply outside projects
 too. Loads, unloads and errors each print one line to stderr. A mapping, approval
 or decryption error unloads the previous environment and loads nothing.
 
