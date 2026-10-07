@@ -219,6 +219,14 @@ typeset() {
 loaded() {
     sh -c 'printf "%s" "$Original"' > "$HOME/export-observed"
     cmp -s "$HOME/$1" "$HOME/export-observed" || fail 'project alias is not exported with its exact value'
+    case $original_state in
+        private)
+            env > "$HOME/export-environment"
+            if grep -F -f "$HOME/private-marker" "$HOME/export-environment" > /dev/null; then
+                fail 'private original leaked into a child environment'
+            fi
+            ;;
+    esac
 }
 restored() {
     case $original_state in
@@ -229,7 +237,7 @@ restored() {
         exported)
             [ "$Original" = "$original_value" ] || fail 'exported original value changed'
             sh -c 'printf "%s" "$Original"' > "$HOME/export-observed"
-            cmp -s "$HOME/expected-value" "$HOME/export-observed" || fail 'exported original lost its export state or bytes'
+            cmp -s "$HOME/original-value" "$HOME/export-observed" || fail 'exported original lost its export state or bytes'
             ;;
         unset)
             [ "${Original+x}" != x ] || fail 'unset original became set'
@@ -239,45 +247,59 @@ restored() {
 }
 cd "$HOME/outside"
 eval "$(envy hook)"
-for original_state in private empty exported unset; do
-    unset Original
-    case $original_state in
-        private|exported)
-            Original=$(cat "$HOME/expected-value"; printf '.')
-            Original=${Original%.}
-            ;;
-        empty) Original='' ;;
-    esac
-    [ "$original_state" != exported ] || export Original
-    original_value=${Original-}
-    for transition in leave swap override config; do
-        cd "$HOME/first"
-        _envy_hook 2> "$HOME/export-notice"
-        loaded expected-value
-        calls=$(wc -l < "$HOME/declaration-calls")
-        cd deep/sub
-        _envy_hook 2> "$HOME/export-notice"
-        [ ! -s "$HOME/export-notice" ] || fail 'subdirectory transition reloaded aliases'
-        [ "$(wc -l < "$HOME/declaration-calls")" = "$calls" ] || fail 'subdirectory transition inspected export state'
-        case $transition in
-            leave) cd "$HOME/outside" ;;
-            swap)
-                cd "$HOME/second"
-                _envy_hook 2> "$HOME/export-notice"
-                loaded second-value
-                cd "$HOME/outside"
+for export_mode in normal allexport; do
+    for original_state in private empty exported unset; do
+        unset Original
+        case $original_state in
+            private|exported)
+                Original=$(cat "$HOME/original-value"; printf '.')
+                Original=${Original%.}
                 ;;
-            override) ENVY_AMBIENT=0 ;;
-            config) envy config ambient off ;;
+            empty) Original='' ;;
         esac
-        _envy_hook 2> "$HOME/export-notice"
-        restored
-        # Re-enable outside the project so each round starts unloaded.
-        cd "$HOME/outside"
-        unset ENVY_AMBIENT
-        envy config ambient on
-        _envy_hook 2> "$HOME/export-notice"
-        restored
+        [ "$original_state" != exported ] || export Original
+        original_value=${Original-}
+        # Enable it after setting the private original, as when sourcing a dotenv.
+        [ "$export_mode" != allexport ] || set -a
+        for transition in leave swap override config; do
+            cd "$HOME/first"
+            _envy_hook 2> "$HOME/export-notice"
+            loaded expected-value
+            calls=$(wc -l < "$HOME/declaration-calls")
+            cd deep/sub
+            _envy_hook 2> "$HOME/export-notice"
+            [ ! -s "$HOME/export-notice" ] || fail 'subdirectory transition reloaded aliases'
+            [ "$(wc -l < "$HOME/declaration-calls")" = "$calls" ] || fail 'subdirectory transition inspected export state'
+            case $transition in
+                leave) cd "$HOME/outside" ;;
+                swap)
+                    cd "$HOME/second"
+                    _envy_hook 2> "$HOME/export-notice"
+                    loaded second-value
+                    cd "$HOME/outside"
+                    ;;
+                override) ENVY_AMBIENT=0 ;;
+                config) envy config ambient off ;;
+            esac
+            _envy_hook 2> "$HOME/export-notice"
+            restored
+            # Re-enable outside the project so each round starts unloaded.
+            cd "$HOME/outside"
+            unset ENVY_AMBIENT
+            envy config ambient on
+            _envy_hook 2> "$HOME/export-notice"
+            restored
+            case $export_mode:$- in
+                allexport:*a*) ;;
+                normal:*a*) fail 'hook enabled allexport' ;;
+                normal:*) ;;
+                *) fail 'hook disabled allexport' ;;
+            esac
+        done
+        set +a
+        # The test's own copy was assigned before set -a; clear its attribute for
+        # the next original rather than carrying an exported copy into that round.
+        unset original_value
     done
 done
 SESSION
@@ -299,6 +321,12 @@ SESSION
 cp "$store/projects/first/map" "$HOME/first-map"
 cp "$store/secrets/SECOND.age" "$HOME/second-ciphertext"
 "$ENVY_BIN" get SECOND > "$HOME/second-value"
+cat > "$HOME/original-value" <<'VALUE'
+shell-private original ' " \ $(touch "$HOME/original-injected") `false` $HOME
+another private line
+
+VALUE
+printf '%s\n' 'shell-private original' > "$HOME/private-marker"
 cp "$XDG_DATA_HOME/envy/identity" "$HOME/identity-backup"
 for shell in bash zsh; do
     command -v "$shell" > /dev/null || fail 'hook test requires bash and zsh'

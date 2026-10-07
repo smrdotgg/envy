@@ -1504,6 +1504,9 @@ envy_hook() {
     [ "$#" -eq 0 ] || envy_error 'usage: envy hook'
     cat <<'HOOK'
 _envy_unload() {
+    # Restoring a private original must not export it through set -a.
+    _ENVY_UNLOAD_OPTIONS=$-
+    set +a
     _ENVY_UNLOAD_COUNT=0
     _ENVY_LOAD_COUNT=0
     _ENVY_REMAINING=${_ENVY_VARS-}
@@ -1533,8 +1536,13 @@ _envy_unload() {
         _ENVY_UNLOAD_COUNT=$((_ENVY_UNLOAD_COUNT + 1))
     done
     unset _ENVY_VARS
+    case $_ENVY_UNLOAD_OPTIONS in *a*) set -a ;; esac
+    unset _ENVY_UNLOAD_OPTIONS
 }
 _envy_save() {
+    # Saved originals stay private even when the caller enables allexport.
+    _ENVY_SAVE_OPTIONS=$-
+    set +a
     _ENVY_ALIAS=$1
     if eval '[ "${'"$_ENVY_ALIAS"'+x}" = x ]'; then
         # Keep private originals in the parent shell, including their export
@@ -1549,6 +1557,8 @@ _envy_save() {
         esac
         unset _ENVY_DECLARATION
     fi
+    case $_ENVY_SAVE_OPTIONS in *a*) set -a ;; esac
+    unset _ENVY_SAVE_OPTIONS
 }
 _envy_hook() {
     _ENVY_STATUS=$?
