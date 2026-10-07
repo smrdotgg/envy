@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+    branches: ['release-dry-run/**']
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update
+            sudo apt-get install -y age dash shellcheck python3 bash zsh
+          else
+            brew install age dash shellcheck python3 zsh
+          fi
+      - name: Run full gate
+        run: |
+          shellcheck -s sh envy install.sh .github/scripts/release-assets.sh
+          dash tests/run.sh
+      - name: Stage release assets and verify version
+        run: |
+          case $GITHUB_REF in
+            refs/tags/*) release_tag=$GITHUB_REF_NAME ;;
+            refs/heads/release-dry-run/*)
+              release_tag=v$(./envy version | sed 's/^envy //') ;;
+            *) exit 1 ;;
+          esac
+          sh .github/scripts/release-assets.sh "$release_tag" "$RUNNER_TEMP/release-assets"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/release-assets/envy
+            ${{ runner.temp }}/release-assets/install.sh
+          if-no-files-found: error
+
+  release:
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          path: ${{ runner.temp }}/tested-assets
+      - name: Verify both tested artifacts against the commit
+        run: |
+          case $GITHUB_REF in
+            refs/tags/*) release_tag=$GITHUB_REF_NAME ;;
+            refs/heads/release-dry-run/*)
+              release_tag=v$(./envy version | sed 's/^envy //') ;;
+            *) exit 1 ;;
+          esac
+          sh .github/scripts/release-assets.sh "$release_tag" "$RUNNER_TEMP/release-assets"
+          for os in ubuntu-latest macos-latest; do
+            for file in envy install.sh; do
+              cmp "$RUNNER_TEMP/release-assets/$file" "$RUNNER_TEMP/tested-assets/release-assets-$os/$file"
+            done
+          done
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "$RUNNER_TEMP/release-assets/envy" "$RUNNER_TEMP/release-assets/install.sh" \
+            --verify-tag --title "$GITHUB_REF_NAME" --generate-notes

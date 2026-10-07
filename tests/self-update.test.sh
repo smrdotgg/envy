@@ -6,7 +6,9 @@ install_dir=$HOME/update\ bin
 mkdir "$install_dir"
 cp "$ENVY_BIN" "$install_dir/envy"
 installed=$install_dir/envy
-sed 's/^ENVY_VERSION=0.1.0-dev$/ENVY_VERSION=0.2.0/' "$ENVY_BIN" > release
+old_version=$("$installed" version)
+old_version=${old_version#envy }
+sed 's/^ENVY_VERSION=.*/ENVY_VERSION=0.2.0/' "$ENVY_BIN" > release
 release=$PWD/release
 mkdir stubs
 cat > stubs/curl <<'CURL'
@@ -28,7 +30,7 @@ export PATH
 
 # Default URL follows the latest release rather than the development branch.
 "$installed" self-update > update.out
-assert_equal "$(cat update.out)" 'envy: updated 0.1.0-dev -> 0.2.0' 'update did not report both versions'
+assert_equal "$(cat update.out)" "envy: updated $old_version -> 0.2.0" 'update did not report both versions'
 assert_equal "$(cat "$HOME/download-calls")" \
     'https://github.com/smrdotgg/envy/releases/latest/download/envy' 'update did not request latest tagged release'
 assert_equal "$("$installed" version)" 'envy 0.2.0' 'new executable not active'

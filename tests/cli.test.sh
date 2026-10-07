@@ -3,7 +3,8 @@ set -eu
 . "$TEST_ROOT/tests/fixtures.sh"
 
 "$ENVY_BIN" version > version.out 2> version.err
-assert_equal "$(cat version.out)" 'envy 0.1.0-dev' 'version output'
+grep -E '^envy [0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$' version.out > /dev/null || fail 'version output'
+[ "$(wc -l < version.out | tr -d ' ')" -eq 1 ] || fail 'version output has extra lines'
 [ ! -s version.err ] || fail 'version wrote to stderr'
 dash "$ENVY_BIN" version > dash.out
 cmp version.out dash.out || fail 'version differs under dash'

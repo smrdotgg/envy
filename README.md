@@ -365,3 +365,22 @@ bare git remote exposed as `TEST_REMOTE`. The runner clears inherited git
 identities and `GH_TOKEN`. Tests can use `tests/fixtures.sh` for assertions and
 additional local remotes; they exercise envy only through its command line.
 CI runs the gate on Ubuntu and macOS. The tool is licensed under MIT.
+
+## Release checklist
+
+1. Bump `ENVY_VERSION` in `envy` to the release version (for example, `0.1.0`).
+2. Merge the reviewed changes to `main`.
+3. Tag that commit with the matching `v` prefix (for example, `v0.1.0`) and
+   push the tag. The release workflow runs the full gate on Ubuntu and macOS,
+   refuses a version mismatch or failed gate, and publishes the unchanged
+   `envy` and `install.sh` files as release assets.
+4. Confirm the README installer one-liner works against a disposable store,
+   then run `envy self-update` and confirm `envy version` reports the release.
+
+Before tagging, push a branch named `release-dry-run/<anything>` to exercise
+the whole workflow except publication, even before it reaches `main`.
+Dry runs use `v` plus the script's current version as the prospective tag.
+Both operating systems upload `release-assets-<os>` workflow artifacts
+containing `envy` and `install.sh`; the final job checks their bytes against
+the commit. The first merge, tag and public-download verification belong to
+release acceptance (#19).
